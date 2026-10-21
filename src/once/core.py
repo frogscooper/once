@@ -9,7 +9,7 @@ import inspect
 import json
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Collection, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -150,6 +150,7 @@ class Once:
         name: str | None = None,
         timeout: float | None = None,
         verify: Verifier | None = None,
+        exclude: Collection[str] = (),
     ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
     def tool(
@@ -159,6 +160,7 @@ class Once:
         name: str | None = None,
         timeout: float | None = None,
         verify: Verifier | None = None,
+        exclude: Collection[str] = (),
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
@@ -167,7 +169,11 @@ class Once:
         ``with once.scope(...)``. If the function has an ``idempotency_key``
         parameter, the computed key is passed in. If the caller passes
         ``idempotency_key`` explicitly, that value is used as the key.
+
+        ``exclude`` names parameters to leave out of the key, such as a
+        framework context object. They are still passed to the function.
         """
+        skip = frozenset(exclude)
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
             tool_name = name or func.__name__
@@ -176,19 +182,19 @@ class Once:
 
                 @functools.wraps(func)
                 async def awrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                    call = self._prepare(func, tool_name, args, kwargs, None, None)
+                    call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
                     return await self._arun(call, True, timeout, verify)
 
-                awrapper.__once_tool__ = (func, tool_name, verify)  # type: ignore[attr-defined]
+                awrapper.__once_tool__ = (func, tool_name, verify, skip)  # type: ignore[attr-defined]
                 return cast(Callable[P, R], awrapper)
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                call = self._prepare(func, tool_name, args, kwargs, None, None)
+                call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
                 result: R = self._run(call, timeout, verify)
                 return result
 
-            wrapper.__once_tool__ = (func, tool_name, verify)  # type: ignore[attr-defined]
+            wrapper.__once_tool__ = (func, tool_name, verify, skip)  # type: ignore[attr-defined]
             return wrapper
 
         if fn is not None:
@@ -213,10 +219,10 @@ class Once:
         name and verify are used unless given here. Use aexecute for async
         functions.
         """
-        func, name, verify = self._unwrap(fn, tool_name, verify)
+        func, name, verify, skip = self._unwrap(fn, tool_name, verify)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
-        call = self._prepare(func, name, (), kwargs, key, scope)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip)
         return self._run(call, timeout, verify)
 
     async def aexecute(
@@ -235,8 +241,8 @@ class Once:
         ``fn`` may be async or plain; a plain function runs in a worker thread.
         ``verify`` may be async or plain.
         """
-        func, name, verify = self._unwrap(fn, tool_name, verify)
-        call = self._prepare(func, name, (), kwargs, key, scope)
+        func, name, verify, skip = self._unwrap(fn, tool_name, verify)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip)
         return await self._arun(call, inspect.iscoroutinefunction(func), timeout, verify)
 
     def close(self) -> None:
@@ -285,15 +291,17 @@ class Once:
 
     def _unwrap(
         self, fn: Callable[..., Any], tool_name: str | None, verify: Verifier | None
-    ) -> tuple[Callable[..., Any], str, Verifier | None]:
+    ) -> tuple[Callable[..., Any], str, Verifier | None, frozenset[str]]:
         func: Callable[..., Any] = fn
         name = tool_name
         marker = getattr(fn, "__once_tool__", None)
         if marker is not None:
-            func, default_name, default_verify = marker
+            func, default_name, default_verify, skip = marker
             name = name or default_name
             verify = verify or default_verify
-        return func, str(name or getattr(func, "__name__", "tool")), verify
+        else:
+            skip = frozenset()
+        return func, str(name or getattr(func, "__name__", "tool")), verify, skip
 
     def _prepare(
         self,
@@ -303,12 +311,13 @@ class Once:
         kwargs: dict[str, Any],
         key: str | None,
         scope: str | None,
+        exclude: frozenset[str] = frozenset(),
     ) -> _Call:
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         explicit = bound.arguments.pop(KEY_PARAM, None)
-        call_args = dict(bound.arguments)
+        call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
         try:
             canonical_json(call_args)
         except (TypeError, ValueError) as exc:

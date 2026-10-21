@@ -188,3 +188,19 @@ def test_non_json_args_are_rejected_before_running(once: Once) -> None:
     with pytest.raises(TypeError, match="JSON serializable"):
         once.execute(f, x=object())
     assert not ran
+
+
+def test_exclude_leaves_params_out_of_the_key(once: Once) -> None:
+    seen: list[object] = []
+
+    @once.tool(exclude=("ctx",))
+    def f(x: int, ctx: object) -> int:
+        seen.append(ctx)
+        return x
+
+    a, b = object(), object()
+    assert f(1, a) == 1
+    assert f(1, b) == 1
+    assert seen == [a]
+    assert once.execute(f, x=1, ctx=b) == 1  # decorated tool keeps its exclude
+    assert len(seen) == 1
