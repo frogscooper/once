@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,9 +66,23 @@ class SQLiteStore:
         self.path = str(path)
         self.busy_timeout = busy_timeout
         self._local = threading.local()
+        self._setup()
+
+    def _setup(self) -> None:
+        # Switching to WAL can fail with "database is locked" without going
+        # through the busy handler when several connections open a new file at
+        # once, so retry here until busy_timeout runs out.
         conn = self._conn()
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(SCHEMA)
+        deadline = time.monotonic() + self.busy_timeout
+        while True:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(SCHEMA)
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
     def _conn(self) -> sqlite3.Connection:
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)

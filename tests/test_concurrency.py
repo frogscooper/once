@@ -27,7 +27,7 @@ SRC = str(Path(__file__).resolve().parents[1] / "src")
 def test_threads_with_same_key_run_once(once: Once) -> None:
     calls = 0
     lock = threading.Lock()
-    start = threading.Barrier(16)
+    start = threading.Barrier(16, timeout=10)
     results: list[object] = []
 
     @once.tool
@@ -55,7 +55,7 @@ def test_threads_with_same_key_run_once(once: Once) -> None:
 def test_threads_with_separate_instances_run_once(db: Path) -> None:
     calls = 0
     lock = threading.Lock()
-    start = threading.Barrier(8)
+    start = threading.Barrier(8, timeout=10)
     outcomes: list[str] = []
 
     def charge() -> str:
@@ -116,6 +116,25 @@ def test_processes_with_same_key_run_once(tmp_path: Path) -> None:
     assert log.read_text() == "x"
     assert outputs.count("ch_1") == 1
     assert outputs.count("pending") == 5
+
+
+def test_many_instances_can_open_a_new_file_at_once(tmp_path: Path) -> None:
+    errors: list[BaseException] = []
+    for i in range(30):
+        db = tmp_path / f"{i}.db"
+
+        def open_store(db: Path = db) -> None:
+            try:
+                Once(db)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_store) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert errors == []
 
 
 def test_pending_raises_without_wait(db: Path) -> None:
