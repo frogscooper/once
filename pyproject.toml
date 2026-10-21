@@ -28,12 +28,15 @@ packages = ["src/once"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not heavy'"
+markers = ["heavy: slow stress tests, run with -m heavy"]
 
 [tool.coverage.run]
 branch = true
 source = ["once"]
 
 [tool.coverage.report]
+fail_under = 95
 show_missing = true
 
 [tool.ruff]
