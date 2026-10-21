@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -295,26 +296,92 @@ def test_mixed_sync_and_async_on_one_db(db: Path) -> None:
     assert replay == "ch_sync"
     assert calls == 1
 
-    # an async call in flight on another thread's loop looks pending to a sync caller
+
+def test_sync_caller_waits_for_async_owner_in_same_process(db: Path) -> None:
+    once = Once(db)
     started = threading.Event()
     release = threading.Event()
+    calls = 0
 
     async def slow(amount: int) -> str:
+        nonlocal calls
+        calls += 1
         started.set()
         await asyncio.to_thread(release.wait, 5)
         return "ch_async"
 
+    def charge_sync(amount: int) -> str:
+        raise AssertionError("should not run")
+
     results: list[Any] = []
     runner = threading.Thread(
         target=lambda: results.append(
-            asyncio.run(once.aexecute(slow, key="k2", tool_name="charge", amount=2))
+            asyncio.run(once.aexecute(slow, key="k", tool_name="charge", amount=2))
         )
     )
     runner.start()
     assert started.wait(5)
-    with pytest.raises(EffectPending):
-        once.execute(charge_sync, key="k2", tool_name="charge", amount=2)
-    release.set()
+    threading.Timer(0.2, release.set).start()
+    # wait=0, but the owner is in this process, so the sync caller waits for it
+    assert once.execute(charge_sync, key="k", tool_name="charge", amount=2) == "ch_async"
     runner.join(5)
     assert results == ["ch_async"]
-    assert once.execute(charge_sync, key="k2", tool_name="charge", amount=2) == "ch_async"
+    assert calls == 1
+
+
+def test_async_caller_waits_for_sync_owner_in_same_process(db: Path) -> None:
+    once = Once(db)
+    started = threading.Event()
+    calls = 0
+
+    def slow(amount: int) -> str:
+        nonlocal calls
+        calls += 1
+        started.set()
+        time.sleep(0.3)
+        return "ch_sync"
+
+    async def charge_async(amount: int) -> str:
+        raise AssertionError("should not run")
+
+    results: list[Any] = []
+    runner = threading.Thread(
+        target=lambda: results.append(once.execute(slow, key="k", tool_name="charge", amount=1))
+    )
+    runner.start()
+    assert started.wait(5)
+
+    async def main() -> tuple[Any, int]:
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while runner.is_alive():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        result, _ = await asyncio.gather(
+            once.aexecute(charge_async, key="k", tool_name="charge", amount=1), ticker()
+        )
+        return result, ticks
+
+    result, ticks = asyncio.run(main())
+    runner.join(5)
+    assert result == "ch_sync"
+    assert results == ["ch_sync"]
+    assert ticks > 5  # the loop kept running while it waited
+    assert calls == 1
+
+
+def test_sync_call_inside_async_owner_does_not_deadlock(once: Once) -> None:
+    def inner(amount: int) -> str:
+        raise AssertionError("should not run")
+
+    async def outer(amount: int) -> str:
+        # a blocking call on the loop thread for the same key must not wait
+        # for the coroutine that is blocking it
+        with pytest.raises(EffectPending):
+            once.execute(inner, key="k", tool_name="charge", amount=amount)
+        return "ok"
+
+    assert asyncio.run(once.aexecute(outer, key="k", tool_name="charge", amount=1)) == "ok"

@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -66,6 +66,8 @@ class SQLiteStore:
         self.path = str(path)
         self.busy_timeout = busy_timeout
         self._local = threading.local()
+        self._conns: dict[threading.Thread, sqlite3.Connection] = {}
+        self._conns_lock = threading.Lock()
         self._setup()
 
     def _setup(self) -> None:
@@ -87,10 +89,30 @@ class SQLiteStore:
     def _conn(self) -> sqlite3.Connection:
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self.path, timeout=self.busy_timeout, isolation_level=None)
+            # Each connection is only used by the thread that opened it;
+            # check_same_thread is off so close() can close them all.
+            conn = sqlite3.connect(
+                self.path,
+                timeout=self.busy_timeout,
+                isolation_level=None,
+                check_same_thread=False,
+            )
             conn.execute(f"PRAGMA busy_timeout={int(self.busy_timeout * 1000)}")
             self._local.conn = conn
+            with self._conns_lock:
+                # Close connections left behind by threads that have exited.
+                for thread in [t for t in self._conns if not t.is_alive()]:
+                    self._conns.pop(thread).close()
+                self._conns[threading.current_thread()] = conn
         return conn
+
+    def close(self) -> None:
+        """Close every connection this store opened. It reopens on next use."""
+        with self._conns_lock:
+            conns, self._conns = self._conns, {}
+        for conn in conns.values():
+            conn.close()
+        self._local = threading.local()
 
     def claim(self, key: str, args_hash: str | None) -> str | None:
         """Insert a pending record. Returns an owner token, or None if the key exists."""
@@ -145,7 +167,10 @@ class SQLiteStore:
         """
         now = _now()
         if now <= record.updated_at:
-            return None
+            # Coarse clocks (Windows) can return the same time twice. The new
+            # value has to differ from the old one, since it is the owner token.
+            later = datetime.fromisoformat(record.updated_at) + timedelta(microseconds=1)
+            now = later.isoformat(timespec="microseconds")
         cur = self._conn().execute(
             "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ? "
             "WHERE key = ? AND status = ? AND updated_at = ?",

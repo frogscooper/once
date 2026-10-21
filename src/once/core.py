@@ -51,6 +51,15 @@ class _TimedOut(Exception):
 
 
 @dataclass(frozen=True)
+class _InFlight:
+    """A call this process is running right now."""
+
+    done: threading.Event
+    thread: int
+    is_async: bool
+
+
+@dataclass(frozen=True)
 class _Call:
     key: str
     args_hash: str
@@ -117,6 +126,8 @@ class Once:
         self._locks: dict[str, tuple[threading.Lock, int]] = {}
         self._alocks: dict[tuple[int, str], tuple[asyncio.Lock, int]] = {}
         self._locks_guard = threading.Lock()
+        self._inflight: dict[str, _InFlight] = {}
+        self._inflight_guard = threading.Lock()
 
     # public API
 
@@ -228,6 +239,16 @@ class Once:
         call = self._prepare(func, name, (), kwargs, key, scope)
         return await self._arun(call, inspect.iscoroutinefunction(func), timeout, verify)
 
+    def close(self) -> None:
+        """Close the SQLite connections. The instance reconnects if used again."""
+        self.store.close()
+
+    def __enter__(self) -> Once:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def get(self, key: str) -> Record | None:
         """Return the stored record for ``key``, if any."""
         return self.store.get(key)
@@ -304,6 +325,41 @@ class Once:
             return Status.UNKNOWN
         return Status.FAILED
 
+    # Calls in this process that own a key are registered in _inflight, so a
+    # caller on the other path (sync vs async, or another loop or thread) that
+    # finds the record pending can wait for it instead of raising EffectPending.
+    # Claiming and registering happen under one lock so a loser never misses
+    # the owner's entry.
+
+    def _claim(
+        self, key: str, h: str, owner: int | None = None
+    ) -> tuple[str | None, _InFlight | None]:
+        """Claim the key. ``owner`` is the event loop's thread for async callers."""
+        with self._inflight_guard:
+            token = self.store.claim(key, h)
+            if token is not None:
+                self._register(key, owner)
+                return token, None
+            return None, self._inflight.get(key)
+
+    def _take_pending(self, record: Record, owner: int | None = None) -> str | None:
+        with self._inflight_guard:
+            token = self.store.take(record, Status.PENDING)
+            if token is not None:
+                self._register(record.key, owner)
+            return token
+
+    def _register(self, key: str, owner: int | None) -> None:
+        is_async = owner is not None
+        thread = owner if owner is not None else threading.get_ident()
+        self._inflight[key] = _InFlight(threading.Event(), thread, is_async)
+
+    def _release(self, key: str) -> None:
+        with self._inflight_guard:
+            entry = self._inflight.pop(key, None)
+        if entry is not None:
+            entry.done.set()
+
     def _record(self, key: str) -> Record:
         record = self.store.get(key)
         assert record is not None
@@ -332,9 +388,16 @@ class Once:
         with self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
-                token = self.store.claim(key, h)
+                token, local = self._claim(key, h)
                 if token is not None:
                     return self._run_owned(key, token, call.invoke, timeout)
+                if local is not None and not (
+                    local.is_async and local.thread == threading.get_ident()
+                ):
+                    # Owned by an async call in this process. Waiting is only
+                    # safe if that call is not running on our own thread.
+                    local.done.wait()
+                    continue
                 record = self._read_settled(key)
                 if record is None:
                     continue  # deleted between claim and read
@@ -346,7 +409,7 @@ class Once:
                     break
                 outcome = verify(key, dict(call.args))
                 if outcome is NOT_HAPPENED:
-                    token = self.store.take(record, Status.PENDING)
+                    token = self._take_pending(record)
                     if token is not None:
                         return self._run_owned(key, token, call.invoke, timeout)
                     continue
@@ -367,6 +430,14 @@ class Once:
         return record
 
     def _run_owned(
+        self, key: str, token: str, call: Callable[[], Any], timeout: float | None
+    ) -> Any:
+        try:
+            return self._run_owned_inner(key, token, call, timeout)
+        finally:
+            self._release(key)
+
+    def _run_owned_inner(
         self, key: str, token: str, call: Callable[[], Any], timeout: float | None
     ) -> Any:
         try:
@@ -416,12 +487,17 @@ class Once:
         self, call: _Call, is_async: bool, timeout: float | None, verify: Verifier | None
     ) -> Any:
         key, h = call.key, call.args_hash
+        loop_thread = threading.get_ident()
         async with self._key_alock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
-                token = await asyncio.to_thread(self.store.claim, key, h)
+                token, local = await asyncio.to_thread(self._claim, key, h, loop_thread)
                 if token is not None:
                     return await self._arun_owned(key, token, call.invoke, is_async, timeout)
+                if local is not None:
+                    while not local.done.is_set():
+                        await asyncio.sleep(self.poll_interval)
+                    continue
                 record = await self._aread_settled(key)
                 if record is None:
                     continue
@@ -433,7 +509,7 @@ class Once:
                     break
                 outcome = await _acall_verify(verify, key, dict(call.args))
                 if outcome is NOT_HAPPENED:
-                    token = await asyncio.to_thread(self.store.take, record, Status.PENDING)
+                    token = await asyncio.to_thread(self._take_pending, record, loop_thread)
                     if token is not None:
                         return await self._arun_owned(key, token, call.invoke, is_async, timeout)
                     continue
@@ -467,6 +543,19 @@ class Once:
         )
 
     async def _arun_owned(
+        self,
+        key: str,
+        token: str,
+        invoke: Callable[[], Any],
+        is_async: bool,
+        timeout: float | None,
+    ) -> Any:
+        try:
+            return await self._arun_owned_inner(key, token, invoke, is_async, timeout)
+        finally:
+            self._release(key)
+
+    async def _arun_owned_inner(
         self,
         key: str,
         token: str,

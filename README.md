@@ -123,7 +123,7 @@ async def run_step(run_id: str) -> None:
         await post_message("#ops", "deploy done")
 ```
 
-The rules are the same as for sync calls. Coroutines on one event loop with the same key wait for the first one and get its result. Other loops, threads, and processes are coordinated through the database claim, so they see `pending` (or wait for `wait` seconds) like a second process would. SQLite calls run in worker threads with `asyncio.to_thread`, so the loop is not blocked.
+The rules are the same as for sync calls. Coroutines on one event loop with the same key wait for the first one and get its result. A sync and an async caller in the same process, or callers on two event loops, also wait for whoever started first and get its result. Other processes see `pending`, or wait up to `wait` seconds. One exception: a blocking sync call on the event loop thread, for a key that a coroutine on that same loop is running, raises `EffectPending` instead of deadlocking. SQLite calls run in worker threads with `asyncio.to_thread`, so the loop is not blocked.
 
 `timeout=` uses `asyncio.wait_for`; the call is cancelled and the record is marked unknown. If the task is cancelled while the tool runs, the record is marked unknown and `CancelledError` is re-raised. `verify` can be a plain or an async function. `aexecute` also accepts a plain function and runs it in a worker thread.
 
