@@ -10,6 +10,8 @@ First release.
 - Async tools, `timeout=`, cancellation marks unknown. Sync and async callers in one process wait for each other.
 - `once` command line tool: `ls`, `show`, `reset`, `gc`. `Once.records()` and `Once.purge()`.
 - `Once.close()`, and `Once` works as a context manager.
+- `exclude=` on `once.tool` to leave parameters out of the key.
+- `once.integrations.mcp` and `once.integrations.langchain` decorators, with examples.
 
 Changes made before the release that break keys from earlier development builds:
 
