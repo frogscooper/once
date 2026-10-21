@@ -9,9 +9,9 @@ from typing import Any
 
 
 def canonical_json(value: Any) -> str:
-    """Serialize ``value`` to JSON with sorted keys and no extra whitespace."""
+    """Serialize ``value`` to JSON with sorted keys, no extra whitespace, ASCII only."""
     return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     )
 
 
@@ -23,9 +23,10 @@ def args_hash(args: Mapping[str, Any]) -> str:
 def make_key(tool_name: str, args: Mapping[str, Any], scope: str | None = None) -> str:
     """Build an idempotency key from a tool name, its arguments, and an optional scope.
 
-    The key is sha256(tool_name + canonical_json(args) + scope), as hex. The
-    scope is usually a run, order, or step id. The same tool called with the
-    same arguments in a different scope gets a different key.
+    The key is sha256(canonical_json([tool_name, args, scope])), as hex. Encoding
+    the three parts as one JSON array keeps them apart, so no choice of tool
+    name, arguments, or scope can collide with another. The scope is usually a
+    run, order, or step id; None and "" are different scopes.
     """
-    payload = tool_name + canonical_json(dict(args)) + (scope or "")
+    payload = canonical_json([tool_name, dict(args), scope])
     return hashlib.sha256(payload.encode()).hexdigest()

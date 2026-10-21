@@ -19,7 +19,7 @@ def once(db: Path) -> Once:
 
 
 def test_make_key_formula() -> None:
-    expected = hashlib.sha256(b'charge_card{"amount":1000,"customer":"cus_123"}order_456')
+    expected = hashlib.sha256(b'["charge_card",{"amount":1000,"customer":"cus_123"},"order_456"]')
     key = make_key("charge_card", {"customer": "cus_123", "amount": 1000}, scope="order_456")
     assert key == expected.hexdigest()
 
