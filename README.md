@@ -47,7 +47,7 @@ Register the decorated function with your agent framework as a normal tool. See 
 
 ## Keys
 
-The key is `sha256(canonical_json({"tool": name, "args": args, "scope": scope}))`. Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. Arguments must be JSON serializable.
+The key is `sha256(tool_name + canonical_json(args) + scope)` as hex, where `canonical_json` sorts keys and drops whitespace. Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. Arguments must be JSON serializable.
 
 The scope is usually a run, order, or step id. Set it with `with once.scope(...)` or pass `scope=` to `execute`. Without a scope, the same call with the same arguments only ever runs once, which is often not what you want for things like "send a reminder".
 
@@ -72,6 +72,37 @@ The first call re-raises the original exception; later calls raise the `Effect*`
 
 Return values go through JSON, so the first call and replays return the same thing (a tuple comes back as a list). If the result cannot be serialized, the record is marked unknown.
 
+## Verify
+
+An unknown record is stuck until someone checks what happened. If the downstream system can answer that, give the tool a `verify` callback and `once` will ask it on the next call instead of raising `EffectUnknown`. Here the tool stores the key in the charge metadata so it can be found later:
+
+```python
+from once import NOT_HAPPENED
+
+
+def find_charge(key: str, args: dict) -> object:
+    charges = stripe.Charge.search(query=f"metadata['once_key']:'{key}'")
+    if not charges.data:
+        return NOT_HAPPENED
+    return {"id": charges.data[0].id}
+
+
+@once.tool(name="charge_card", verify=find_charge)
+def charge_card(amount: int, customer: str, idempotency_key: str | None = None) -> dict:
+    charge = stripe.Charge.create(
+        amount=amount,
+        currency="usd",
+        customer=customer,
+        idempotency_key=idempotency_key,
+        metadata={"once_key": idempotency_key},
+    )
+    return {"id": charge.id}
+```
+
+`verify(key, args)` gets the key and the call arguments. If it returns a result, the record becomes `done` with that result and nothing runs. If it returns `NOT_HAPPENED`, the record is taken over and the function runs again. If it raises, the record is left as it was and the error propagates. `execute(..., verify=...)` works the same way.
+
+Verify is also used for pending records older than `Once(stale_after=...)` seconds, which covers a process that died mid-call. Pick a value well above the tool's longest run, since a pending record that is merely slow looks the same. A record that was taken over can no longer be written by its old owner. Failed records are never verified, and nothing is re-run without a verify callback saying so.
+
 ## Storage
 
 One table in SQLite, in WAL mode with a busy timeout:
@@ -85,9 +116,9 @@ A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts 
 
 ## Limitations
 
-This is at-most-once, not exactly-once. If the process dies after the side effect happens but before the result is written, the record stays `pending` forever and the call will not run again. That is on purpose: running it twice is the thing we are trying to avoid. You need to look at the downstream system and then `reset` the key or leave it.
+This is at-most-once, not exactly-once. If the process dies after the side effect happens but before the result is written, the record stays `pending` and the call will not run again unless you set `stale_after` and a `verify` callback. That is on purpose: running it twice is the thing we are trying to avoid. You need to look at the downstream system and then `reset` the key or leave it.
 
-The way to close that gap is to forward the key to the downstream API's own idempotency key (Stripe, many payment and messaging APIs support one). Then a retry after `reset` is safe too.
+The way to close that gap is to forward the key to the downstream API's own idempotency key (Stripe, many payment and messaging APIs support one). Then a retry after `reset` is safe too. A `verify` callback (above) turns the manual check into code.
 
 Async functions are not supported yet.
 
