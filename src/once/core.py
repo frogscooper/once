@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import functools
 import inspect
 import json
@@ -22,7 +23,22 @@ R = TypeVar("R")
 
 KEY_PARAM = "idempotency_key"
 
+Verifier = Callable[[str, dict[str, Any]], Any]
+"""verify(key, args) returns the effect's result if it happened, or NOT_HAPPENED."""
+
 _current_scope: ContextVar[str | None] = ContextVar("once_scope", default=None)
+
+
+class _NotHappened(enum.Enum):
+    NOT_HAPPENED = "not_happened"
+
+
+NOT_HAPPENED = _NotHappened.NOT_HAPPENED
+"""Return this from a verify callback when the side effect did not happen."""
+
+# Rounds of "claim, read, verify" before giving up when other callers keep
+# changing the record under us.
+_MAX_ROUNDS = 5
 
 
 class _TimedOut(Exception):
@@ -65,6 +81,8 @@ class Once:
         finish before raising EffectPending. 0 means raise right away.
     unknown_on: exception types that mean "the effect may have happened". They
         mark the record unknown instead of failed. Defaults to TimeoutError.
+    stale_after: seconds after which a pending record counts as abandoned and
+        is handed to verify, if the call has one. None means never.
     busy_timeout: SQLite busy timeout in seconds.
     """
 
@@ -75,12 +93,14 @@ class Once:
         wait: float = 0.0,
         poll_interval: float = 0.05,
         unknown_on: tuple[type[BaseException], ...] = (TimeoutError,),
+        stale_after: float | None = None,
         busy_timeout: float = 5.0,
     ) -> None:
         self.store = SQLiteStore(path, busy_timeout=busy_timeout)
         self.wait = wait
         self.poll_interval = poll_interval
         self.unknown_on = unknown_on
+        self.stale_after = stale_after
         self._locks: dict[str, tuple[threading.Lock, int]] = {}
         self._locks_guard = threading.Lock()
 
@@ -100,7 +120,11 @@ class Once:
 
     @overload
     def tool(
-        self, *, name: str | None = None, timeout: float | None = None
+        self,
+        *,
+        name: str | None = None,
+        timeout: float | None = None,
+        verify: Verifier | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
     def tool(
@@ -109,6 +133,7 @@ class Once:
         *,
         name: str | None = None,
         timeout: float | None = None,
+        verify: Verifier | None = None,
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
@@ -125,10 +150,10 @@ class Once:
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                result: R = self._run(func, tool_name, args, kwargs, None, None, timeout)
+                result: R = self._run(func, tool_name, args, kwargs, None, None, timeout, verify)
                 return result
 
-            wrapper.__once_tool__ = (func, tool_name)  # type: ignore[attr-defined]
+            wrapper.__once_tool__ = (func, tool_name, verify)  # type: ignore[attr-defined]
             return wrapper
 
         if fn is not None:
@@ -143,21 +168,24 @@ class Once:
         tool_name: str | None = None,
         scope: str | None = None,
         timeout: float | None = None,
+        verify: Verifier | None = None,
         **kwargs: Any,
     ) -> Any:
         """Call ``fn(**kwargs)`` at most once for ``key``.
 
         Without ``key``, the key is make_key(tool_name, kwargs, scope). ``fn`` may
-        be a plain function or one decorated with ``tool``.
+        be a plain function or one decorated with ``tool``, in which case its
+        name and verify are used unless given here.
         """
         func: Callable[..., Any] = fn
         name = tool_name
         marker = getattr(fn, "__once_tool__", None)
         if marker is not None:
-            func, default_name = marker
+            func, default_name, default_verify = marker
             name = name or default_name
+            verify = verify or default_verify
         resolved = str(name or getattr(func, "__name__", "tool"))
-        return self._run(func, resolved, (), kwargs, key, scope, timeout)
+        return self._run(func, resolved, (), kwargs, key, scope, timeout, verify)
 
     def get(self, key: str) -> Record | None:
         """Return the stored record for ``key``, if any."""
@@ -198,6 +226,7 @@ class Once:
         key: str | None,
         scope: str | None,
         timeout: float | None,
+        verify: Verifier | None,
     ) -> Any:
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
@@ -219,12 +248,46 @@ class Once:
             bound.arguments[KEY_PARAM] = key
         h = args_hash({"tool": tool_name, "args": call_args})
 
-        with self._key_lock(key):
-            if self.store.claim(key, h):
-                return self._run_owned(key, lambda: func(*bound.args, **bound.kwargs), timeout)
-            return self._existing(key, h)
+        def call() -> Any:
+            return func(*bound.args, **bound.kwargs)
 
-    def _existing(self, key: str, h: str) -> Any:
+        with self._key_lock(key):
+            record: Record | None = None
+            for _ in range(_MAX_ROUNDS):
+                token = self.store.claim(key, h)
+                if token is not None:
+                    return self._run_owned(key, token, call, timeout)
+                record = self._read_settled(key)
+                if record is None:
+                    continue  # deleted between claim and read
+                if record.args_hash != h:
+                    raise KeyConflict(key, record.args_hash, h)
+                if record.status is Status.DONE:
+                    return _loads(record.result)
+                if verify is None or not self._verifiable(record):
+                    break
+                outcome = verify(key, dict(call_args))
+                if outcome is NOT_HAPPENED:
+                    token = self.store.take(record, Status.PENDING)
+                    if token is not None:
+                        return self._run_owned(key, token, call, timeout)
+                    continue
+                payload = _dumps(outcome)
+                if self.store.take(record, Status.DONE, result=payload) is not None:
+                    return _loads(payload)
+            raise _error_for(key, h, record)
+
+    def _verifiable(self, record: Record) -> bool:
+        if record.status is Status.UNKNOWN:
+            return True
+        return (
+            record.status is Status.PENDING
+            and self.stale_after is not None
+            and record.age() >= self.stale_after
+        )
+
+    def _read_settled(self, key: str) -> Record | None:
+        """Read the record, waiting up to self.wait while it is pending."""
         record = self.store.get(key)
         deadline = time.monotonic() + self.wait
         while (
@@ -232,44 +295,59 @@ class Once:
         ):
             time.sleep(self.poll_interval)
             record = self.store.get(key)
-        if record is None:
-            raise EffectPending(Record(key, Status.PENDING, None, "record was deleted", h, "", ""))
-        if record.args_hash != h:
-            raise KeyConflict(key, record.args_hash, h)
-        if record.status is Status.DONE:
-            return json.loads(record.result) if record.result is not None else None
-        if record.status is Status.PENDING:
-            raise EffectPending(record)
-        if record.status is Status.FAILED:
-            raise EffectFailed(record)
-        raise EffectUnknown(record)
+        return record
 
-    def _run_owned(self, key: str, call: Callable[[], Any], timeout: float | None) -> Any:
+    def _run_owned(
+        self, key: str, token: str, call: Callable[[], Any], timeout: float | None
+    ) -> Any:
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
         except _TimedOut as exc:
-            self.store.finish(key, Status.UNKNOWN, error=f"timeout: {exc}")
+            self.store.finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
             raise EffectUnknown(self._record(key)) from None
         except self.unknown_on as exc:
-            self.store.finish(key, Status.UNKNOWN, error=_describe(exc))
+            self.store.finish(key, token, Status.UNKNOWN, error=_describe(exc))
             raise
         except Exception as exc:
-            self.store.finish(key, Status.FAILED, error=_describe(exc))
+            self.store.finish(key, token, Status.FAILED, error=_describe(exc))
             raise
         except BaseException as exc:
             # KeyboardInterrupt and friends: we cannot tell if the effect happened.
-            self.store.finish(key, Status.UNKNOWN, error=_describe(exc))
+            self.store.finish(key, token, Status.UNKNOWN, error=_describe(exc))
             raise
 
         try:
-            payload = json.dumps(result, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            self.store.finish(key, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}")
+            payload = _dumps(result)
+        except TypeError as exc:
+            self.store.finish(
+                key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
+            )
             raise EffectUnknown(self._record(key)) from exc
-        self.store.finish(key, Status.DONE, result=payload)
-        return json.loads(payload)
+        self.store.finish(key, token, Status.DONE, result=payload)
+        return _loads(payload)
 
     def _record(self, key: str) -> Record:
         record = self.store.get(key)
         assert record is not None
         return record
+
+
+def _dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(str(exc)) from exc
+
+
+def _loads(payload: str | None) -> Any:
+    return json.loads(payload) if payload is not None else None
+
+
+def _error_for(key: str, h: str, record: Record | None) -> Exception:
+    if record is None:
+        return EffectPending(Record(key, Status.PENDING, None, "record keeps changing", h, "", ""))
+    if record.status is Status.PENDING:
+        return EffectPending(record)
+    if record.status is Status.FAILED:
+        return EffectFailed(record)
+    return EffectUnknown(record)

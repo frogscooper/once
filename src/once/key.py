@@ -23,8 +23,9 @@ def args_hash(args: Mapping[str, Any]) -> str:
 def make_key(tool_name: str, args: Mapping[str, Any], scope: str | None = None) -> str:
     """Build an idempotency key from a tool name, its arguments, and an optional scope.
 
-    The scope is usually a run, order, or step id. The same tool called with the
+    The key is sha256(tool_name + canonical_json(args) + scope), as hex. The
+    scope is usually a run, order, or step id. The same tool called with the
     same arguments in a different scope gets a different key.
     """
-    payload = canonical_json({"tool": tool_name, "args": dict(args), "scope": scope})
+    payload = tool_name + canonical_json(dict(args)) + (scope or "")
     return hashlib.sha256(payload.encode()).hexdigest()

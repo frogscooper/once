@@ -132,11 +132,12 @@ def test_pending_raises_without_wait(db: Path) -> None:
 def test_wait_returns_result_once_pending_finishes(db: Path) -> None:
     h = args_hash({"tool": "f", "args": {}})
     owner = Once(db)
-    assert owner.store.claim("k", h)
+    token = owner.store.claim("k", h)
+    assert token is not None
 
     def finish_later() -> None:
         time.sleep(0.2)
-        owner.store.finish("k", Status.DONE, result='"late"')
+        owner.store.finish("k", token, Status.DONE, result='"late"')
 
     threading.Thread(target=finish_later).start()
 
