@@ -103,6 +103,30 @@ def charge_card(amount: int, customer: str, idempotency_key: str | None = None) 
 
 Verify is also used for pending records older than `Once(stale_after=...)` seconds, which covers a process that died mid-call. Pick a value well above the tool's longest run, since a pending record that is merely slow looks the same. A record that was taken over can no longer be written by its old owner. Failed records are never verified, and nothing is re-run without a verify callback saying so.
 
+## Async
+
+`@once.tool` works on `async def` functions and gives you an async wrapper. For explicit calls use `await once.aexecute(...)`, which takes the same arguments as `execute`.
+
+```python
+@once.tool(name="post_message", timeout=10)
+async def post_message(channel: str, text: str, idempotency_key: str | None = None) -> dict:
+    resp = await http.post(
+        "/messages",
+        json={"channel": channel, "text": text},
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    return resp.json()
+
+
+async def run_step(run_id: str) -> None:
+    with once.scope(run_id):
+        await post_message("#ops", "deploy done")
+```
+
+The rules are the same as for sync calls. Coroutines on one event loop with the same key wait for the first one and get its result. Other loops, threads, and processes are coordinated through the database claim, so they see `pending` (or wait for `wait` seconds) like a second process would. SQLite calls run in worker threads with `asyncio.to_thread`, so the loop is not blocked.
+
+`timeout=` uses `asyncio.wait_for`; the call is cancelled and the record is marked unknown. If the task is cancelled while the tool runs, the record is marked unknown and `CancelledError` is re-raised. `verify` can be a plain or an async function. `aexecute` also accepts a plain function and runs it in a worker thread.
+
 ## Storage
 
 One table in SQLite, in WAL mode with a busy timeout:
@@ -119,8 +143,6 @@ A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts 
 This is at-most-once, not exactly-once. If the process dies after the side effect happens but before the result is written, the record stays `pending` and the call will not run again unless you set `stale_after` and a `verify` callback. That is on purpose: running it twice is the thing we are trying to avoid. You need to look at the downstream system and then `reset` the key or leave it.
 
 The way to close that gap is to forward the key to the downstream API's own idempotency key (Stripe, many payment and messaging APIs support one). Then a retry after `reset` is safe too. A `verify` callback (above) turns the manual check into code.
-
-Async functions are not supported yet.
 
 ## License
 
