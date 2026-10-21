@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import functools
 import inspect
 import json
 import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar, overload
+from typing import Any, ParamSpec, TypeVar, cast, overload
 
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
 from .key import args_hash, canonical_json, make_key
@@ -24,7 +26,10 @@ R = TypeVar("R")
 KEY_PARAM = "idempotency_key"
 
 Verifier = Callable[[str, dict[str, Any]], Any]
-"""verify(key, args) returns the effect's result if it happened, or NOT_HAPPENED."""
+"""verify(key, args) returns the effect's result if it happened, or NOT_HAPPENED.
+
+For async tools it may also be an async function.
+"""
 
 _current_scope: ContextVar[str | None] = ContextVar("once_scope", default=None)
 
@@ -43,6 +48,14 @@ _MAX_ROUNDS = 5
 
 class _TimedOut(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class _Call:
+    key: str
+    args_hash: str
+    args: dict[str, Any]
+    invoke: Callable[[], Any]
 
 
 def _describe(exc: BaseException) -> str:
@@ -102,6 +115,7 @@ class Once:
         self.unknown_on = unknown_on
         self.stale_after = stale_after
         self._locks: dict[str, tuple[threading.Lock, int]] = {}
+        self._alocks: dict[tuple[int, str], tuple[asyncio.Lock, int]] = {}
         self._locks_guard = threading.Lock()
 
     # public API
@@ -137,20 +151,30 @@ class Once:
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
-        The key is make_key(name, args, scope), where scope comes from
+        Works on plain and async functions; an async function gets an async
+        wrapper. The key is make_key(name, args, scope), where scope comes from
         ``with once.scope(...)``. If the function has an ``idempotency_key``
         parameter, the computed key is passed in. If the caller passes
         ``idempotency_key`` explicitly, that value is used as the key.
         """
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
-            if inspect.iscoroutinefunction(func):
-                raise TypeError("once does not support async functions yet")
             tool_name = name or func.__name__
+
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def awrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
+                    call = self._prepare(func, tool_name, args, kwargs, None, None)
+                    return await self._arun(call, True, timeout, verify)
+
+                awrapper.__once_tool__ = (func, tool_name, verify)  # type: ignore[attr-defined]
+                return cast(Callable[P, R], awrapper)
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                result: R = self._run(func, tool_name, args, kwargs, None, None, timeout, verify)
+                call = self._prepare(func, tool_name, args, kwargs, None, None)
+                result: R = self._run(call, timeout, verify)
                 return result
 
             wrapper.__once_tool__ = (func, tool_name, verify)  # type: ignore[attr-defined]
@@ -175,17 +199,34 @@ class Once:
 
         Without ``key``, the key is make_key(tool_name, kwargs, scope). ``fn`` may
         be a plain function or one decorated with ``tool``, in which case its
-        name and verify are used unless given here.
+        name and verify are used unless given here. Use aexecute for async
+        functions.
         """
-        func: Callable[..., Any] = fn
-        name = tool_name
-        marker = getattr(fn, "__once_tool__", None)
-        if marker is not None:
-            func, default_name, default_verify = marker
-            name = name or default_name
-            verify = verify or default_verify
-        resolved = str(name or getattr(func, "__name__", "tool"))
-        return self._run(func, resolved, (), kwargs, key, scope, timeout, verify)
+        func, name, verify = self._unwrap(fn, tool_name, verify)
+        if inspect.iscoroutinefunction(func):
+            raise TypeError(f"{name!r} is async, use aexecute")
+        call = self._prepare(func, name, (), kwargs, key, scope)
+        return self._run(call, timeout, verify)
+
+    async def aexecute(
+        self,
+        fn: Callable[..., Any],
+        *,
+        key: str | None = None,
+        tool_name: str | None = None,
+        scope: str | None = None,
+        timeout: float | None = None,
+        verify: Verifier | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Async version of execute.
+
+        ``fn`` may be async or plain; a plain function runs in a worker thread.
+        ``verify`` may be async or plain.
+        """
+        func, name, verify = self._unwrap(fn, tool_name, verify)
+        call = self._prepare(func, name, (), kwargs, key, scope)
+        return await self._arun(call, inspect.iscoroutinefunction(func), timeout, verify)
 
     def get(self, key: str) -> Record | None:
         """Return the stored record for ``key``, if any."""
@@ -199,25 +240,21 @@ class Once:
         """
         return self.store.delete(key)
 
-    # internals
+    # shared internals
 
-    @contextmanager
-    def _key_lock(self, key: str) -> Iterator[None]:
-        with self._locks_guard:
-            lock, count = self._locks.get(key, (threading.Lock(), 0))
-            self._locks[key] = (lock, count + 1)
-        try:
-            with lock:
-                yield
-        finally:
-            with self._locks_guard:
-                lock, count = self._locks[key]
-                if count <= 1:
-                    del self._locks[key]
-                else:
-                    self._locks[key] = (lock, count - 1)
+    def _unwrap(
+        self, fn: Callable[..., Any], tool_name: str | None, verify: Verifier | None
+    ) -> tuple[Callable[..., Any], str, Verifier | None]:
+        func: Callable[..., Any] = fn
+        name = tool_name
+        marker = getattr(fn, "__once_tool__", None)
+        if marker is not None:
+            func, default_name, default_verify = marker
+            name = name or default_name
+            verify = verify or default_verify
+        return func, str(name or getattr(func, "__name__", "tool")), verify
 
-    def _run(
+    def _prepare(
         self,
         func: Callable[..., Any],
         tool_name: str,
@@ -225,9 +262,7 @@ class Once:
         kwargs: dict[str, Any],
         key: str | None,
         scope: str | None,
-        timeout: float | None,
-        verify: Verifier | None,
-    ) -> Any:
+    ) -> _Call:
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
@@ -248,34 +283,10 @@ class Once:
             bound.arguments[KEY_PARAM] = key
         h = args_hash({"tool": tool_name, "args": call_args})
 
-        def call() -> Any:
+        def invoke() -> Any:
             return func(*bound.args, **bound.kwargs)
 
-        with self._key_lock(key):
-            record: Record | None = None
-            for _ in range(_MAX_ROUNDS):
-                token = self.store.claim(key, h)
-                if token is not None:
-                    return self._run_owned(key, token, call, timeout)
-                record = self._read_settled(key)
-                if record is None:
-                    continue  # deleted between claim and read
-                if record.args_hash != h:
-                    raise KeyConflict(key, record.args_hash, h)
-                if record.status is Status.DONE:
-                    return _loads(record.result)
-                if verify is None or not self._verifiable(record):
-                    break
-                outcome = verify(key, dict(call_args))
-                if outcome is NOT_HAPPENED:
-                    token = self.store.take(record, Status.PENDING)
-                    if token is not None:
-                        return self._run_owned(key, token, call, timeout)
-                    continue
-                payload = _dumps(outcome)
-                if self.store.take(record, Status.DONE, result=payload) is not None:
-                    return _loads(payload)
-            raise _error_for(key, h, record)
+        return _Call(key, h, call_args, invoke)
 
     def _verifiable(self, record: Record) -> bool:
         if record.status is Status.UNKNOWN:
@@ -285,6 +296,64 @@ class Once:
             and self.stale_after is not None
             and record.age() >= self.stale_after
         )
+
+    def _error_status(self, exc: BaseException) -> Status:
+        # KeyboardInterrupt, CancelledError and friends: we cannot tell if the
+        # effect happened.
+        if isinstance(exc, self.unknown_on) or not isinstance(exc, Exception):
+            return Status.UNKNOWN
+        return Status.FAILED
+
+    def _record(self, key: str) -> Record:
+        record = self.store.get(key)
+        assert record is not None
+        return record
+
+    # sync path
+
+    @contextmanager
+    def _key_lock(self, key: str) -> Iterator[None]:
+        with self._locks_guard:
+            lock, count = self._locks.get(key, (threading.Lock(), 0))
+            self._locks[key] = (lock, count + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._locks_guard:
+                lock, count = self._locks[key]
+                if count <= 1:
+                    del self._locks[key]
+                else:
+                    self._locks[key] = (lock, count - 1)
+
+    def _run(self, call: _Call, timeout: float | None, verify: Verifier | None) -> Any:
+        key, h = call.key, call.args_hash
+        with self._key_lock(key):
+            record: Record | None = None
+            for _ in range(_MAX_ROUNDS):
+                token = self.store.claim(key, h)
+                if token is not None:
+                    return self._run_owned(key, token, call.invoke, timeout)
+                record = self._read_settled(key)
+                if record is None:
+                    continue  # deleted between claim and read
+                if record.args_hash != h:
+                    raise KeyConflict(key, record.args_hash, h)
+                if record.status is Status.DONE:
+                    return _loads(record.result)
+                if verify is None or not self._verifiable(record):
+                    break
+                outcome = verify(key, dict(call.args))
+                if outcome is NOT_HAPPENED:
+                    token = self.store.take(record, Status.PENDING)
+                    if token is not None:
+                        return self._run_owned(key, token, call.invoke, timeout)
+                    continue
+                payload = _dumps(outcome)
+                if self.store.take(record, Status.DONE, result=payload) is not None:
+                    return _loads(payload)
+            raise _error_for(key, h, record)
 
     def _read_settled(self, key: str) -> Record | None:
         """Read the record, waiting up to self.wait while it is pending."""
@@ -305,15 +374,8 @@ class Once:
         except _TimedOut as exc:
             self.store.finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
             raise EffectUnknown(self._record(key)) from None
-        except self.unknown_on as exc:
-            self.store.finish(key, token, Status.UNKNOWN, error=_describe(exc))
-            raise
-        except Exception as exc:
-            self.store.finish(key, token, Status.FAILED, error=_describe(exc))
-            raise
         except BaseException as exc:
-            # KeyboardInterrupt and friends: we cannot tell if the effect happened.
-            self.store.finish(key, token, Status.UNKNOWN, error=_describe(exc))
+            self.store.finish(key, token, self._error_status(exc), error=_describe(exc))
             raise
 
         try:
@@ -326,10 +388,140 @@ class Once:
         self.store.finish(key, token, Status.DONE, result=payload)
         return _loads(payload)
 
-    def _record(self, key: str) -> Record:
-        record = self.store.get(key)
-        assert record is not None
+    # async path
+    #
+    # Async callers do not take the threading lock. Coroutines on the same loop
+    # are serialized by a per-loop, per-key asyncio.Lock; everything else (other
+    # threads, loops, processes) is coordinated through the SQLite claim, the
+    # same way separate processes are. Store calls run in worker threads.
+
+    @asynccontextmanager
+    async def _key_alock(self, key: str) -> AsyncIterator[None]:
+        slot = (id(asyncio.get_running_loop()), key)
+        with self._locks_guard:
+            lock, count = self._alocks.get(slot, (asyncio.Lock(), 0))
+            self._alocks[slot] = (lock, count + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            with self._locks_guard:
+                lock, count = self._alocks[slot]
+                if count <= 1:
+                    del self._alocks[slot]
+                else:
+                    self._alocks[slot] = (lock, count - 1)
+
+    async def _arun(
+        self, call: _Call, is_async: bool, timeout: float | None, verify: Verifier | None
+    ) -> Any:
+        key, h = call.key, call.args_hash
+        async with self._key_alock(key):
+            record: Record | None = None
+            for _ in range(_MAX_ROUNDS):
+                token = await asyncio.to_thread(self.store.claim, key, h)
+                if token is not None:
+                    return await self._arun_owned(key, token, call.invoke, is_async, timeout)
+                record = await self._aread_settled(key)
+                if record is None:
+                    continue
+                if record.args_hash != h:
+                    raise KeyConflict(key, record.args_hash, h)
+                if record.status is Status.DONE:
+                    return _loads(record.result)
+                if verify is None or not self._verifiable(record):
+                    break
+                outcome = await _acall_verify(verify, key, dict(call.args))
+                if outcome is NOT_HAPPENED:
+                    token = await asyncio.to_thread(self.store.take, record, Status.PENDING)
+                    if token is not None:
+                        return await self._arun_owned(key, token, call.invoke, is_async, timeout)
+                    continue
+                payload = _dumps(outcome)
+                taken = await asyncio.to_thread(self.store.take, record, Status.DONE, payload, None)
+                if taken is not None:
+                    return _loads(payload)
+            raise _error_for(key, h, record)
+
+    async def _aread_settled(self, key: str) -> Record | None:
+        record = await asyncio.to_thread(self.store.get, key)
+        deadline = time.monotonic() + self.wait
+        while (
+            record is not None and record.status is Status.PENDING and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(self.poll_interval)
+            record = await asyncio.to_thread(self.store.get, key)
         return record
+
+    async def _afinish(
+        self,
+        key: str,
+        token: str,
+        status: Status,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        # Shielded so the outcome is still written if we get cancelled again.
+        await asyncio.shield(
+            asyncio.to_thread(self.store.finish, key, token, status, result, error)
+        )
+
+    async def _arun_owned(
+        self,
+        key: str,
+        token: str,
+        invoke: Callable[[], Any],
+        is_async: bool,
+        timeout: float | None,
+    ) -> Any:
+        raised: list[BaseException] = []
+
+        async def tracked() -> Any:
+            try:
+                if is_async:
+                    return await invoke()
+                return await asyncio.to_thread(invoke)
+            except BaseException as exc:
+                raised.append(exc)
+                raise
+
+        try:
+            if timeout is None:
+                result = await tracked()
+            else:
+                result = await asyncio.wait_for(tracked(), timeout)
+        except BaseException as exc:
+            timed_out = (
+                timeout is not None
+                and isinstance(exc, asyncio.TimeoutError)
+                and not any(e is exc for e in raised)
+            )
+            if timed_out:
+                await self._afinish(
+                    key, token, Status.UNKNOWN, error=f"timeout: no response after {timeout}s"
+                )
+                raise EffectUnknown(await asyncio.to_thread(self._record, key)) from None
+            await self._afinish(key, token, self._error_status(exc), error=_describe(exc))
+            raise
+
+        try:
+            payload = _dumps(result)
+        except TypeError as exc:
+            await self._afinish(
+                key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
+            )
+            raise EffectUnknown(await asyncio.to_thread(self._record, key)) from exc
+        await self._afinish(key, token, Status.DONE, result=payload)
+        return _loads(payload)
+
+
+async def _acall_verify(verify: Verifier, key: str, args: dict[str, Any]) -> Any:
+    if inspect.iscoroutinefunction(verify):
+        return await verify(key, args)
+    outcome = await asyncio.to_thread(verify, key, args)
+    if inspect.isawaitable(outcome):
+        outcome = await outcome
+    return outcome
 
 
 def _dumps(value: Any) -> str:

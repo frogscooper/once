@@ -188,11 +188,3 @@ def test_non_json_args_are_rejected_before_running(once: Once) -> None:
     with pytest.raises(TypeError, match="JSON serializable"):
         once.execute(f, x=object())
     assert not ran
-
-
-def test_async_functions_are_rejected(once: Once) -> None:
-    async def f() -> None:
-        pass
-
-    with pytest.raises(TypeError, match="async"):
-        once.tool(f)
