@@ -127,6 +127,34 @@ The rules are the same as for sync calls. Coroutines on one event loop with the 
 
 `timeout=` uses `asyncio.wait_for`; the call is cancelled and the record is marked unknown. If the task is cancelled while the tool runs, the record is marked unknown and `CancelledError` is re-raised. `verify` can be a plain or an async function. `aexecute` also accepts a plain function and runs it in a worker thread.
 
+## Framework helpers
+
+`once.integrations` has decorators for MCP servers and LangChain/LangGraph tools. They don't import the framework, so there is nothing extra to install. Put them under the framework's own decorator. They leave the framework's context or config parameter out of the key, set the scope from it, and hide `idempotency_key` from the tool schema so the model never sees it.
+
+MCP (`FastMCP` in mcp 1.x, `MCPServer` in 2.x). The scope is `scope_arg` if you name one, otherwise the MCP session id. Request ids are not used, since a retried call gets a new one.
+
+```python
+from once.integrations.mcp import once_tool
+
+
+@server.tool()
+@once_tool(once, name="charge_card", scope_arg="order_id")
+async def charge_card(order_id: str, amount: int, ctx: Context) -> dict: ...
+```
+
+LangChain and LangGraph. The scope is `config["configurable"]["thread_id"]`, so a replayed step in a thread gets the stored result:
+
+```python
+from once.integrations.langchain import once_tool
+
+
+@tool
+@once_tool(once)
+def send_email(to: str, subject: str, config: RunnableConfig) -> str: ...
+```
+
+Runnable versions are in `examples/mcp_server.py` and `examples/langgraph_example.py`. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
+
 ## CLI
 
 The package installs a `once` command for looking at and cleaning up a database. It reads `--db` or `$ONCE_DB`, defaulting to `./once.db`.

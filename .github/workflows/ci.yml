@@ -54,4 +54,5 @@ jobs:
       - run: pip install -e ".[dev]" langchain-core langgraph "${{ matrix.mcp }}"
       - run: pytest -q tests/test_integrations.py tests/test_integrations_mcp.py tests/test_integrations_langchain.py
       - run: python examples/langgraph_example.py
+      - run: python examples/mcp_server.py --demo
       - run: pytest -q -m heavy tests/test_stress.py
