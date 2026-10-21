@@ -127,6 +127,20 @@ The rules are the same as for sync calls. Coroutines on one event loop with the 
 
 `timeout=` uses `asyncio.wait_for`; the call is cancelled and the record is marked unknown. If the task is cancelled while the tool runs, the record is marked unknown and `CancelledError` is re-raised. `verify` can be a plain or an async function. `aexecute` also accepts a plain function and runs it in a worker thread.
 
+## CLI
+
+The package installs a `once` command for looking at and cleaning up a database. It reads `--db` or `$ONCE_DB`, defaulting to `./once.db`.
+
+```
+once ls [--status unknown] [--limit 20]   # key, status, updated_at, error
+once show 3f2a                           # one record as JSON; a unique key prefix works
+once reset 3f2a                          # delete it so the call can run again
+once gc --older-than 7d                  # delete done records older than 7 days
+once gc --older-than 30d --status failed --status done
+```
+
+`gc` only deletes done records unless you pass `--status`. Deleting a pending or unknown record means the call can run again, so do that with `reset` after checking. The same operations are on `Once` as `records(status=..., limit=...)`, `purge(older_than_seconds, status=...)` and `reset(key)`.
+
 ## Storage
 
 One table in SQLite, in WAL mode with a busy timeout:
