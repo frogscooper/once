@@ -9,7 +9,7 @@ import inspect
 import json
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -252,6 +252,26 @@ class Once:
     def get(self, key: str) -> Record | None:
         """Return the stored record for ``key``, if any."""
         return self.store.get(key)
+
+    def records(
+        self, status: Status | str | Iterable[Status | str] | None = None, limit: int | None = None
+    ) -> list[Record]:
+        """Stored records, most recently updated first, optionally filtered by status."""
+        return self.store.records(_statuses(status), limit)
+
+    def purge(
+        self,
+        older_than: float,
+        status: Status | str | Iterable[Status | str] = Status.DONE,
+    ) -> int:
+        """Delete records not updated for ``older_than`` seconds. Returns the count.
+
+        Only done records by default. Purging pending or unknown records lets
+        those calls run again, so pass them explicitly if that is what you want.
+        """
+        statuses = _statuses(status)
+        assert statuses is not None
+        return self.store.purge(older_than, statuses)
 
     def reset(self, key: str) -> bool:
         """Delete the record for ``key`` so the next call runs again.
@@ -611,6 +631,16 @@ async def _acall_verify(verify: Verifier, key: str, args: dict[str, Any]) -> Any
     if inspect.isawaitable(outcome):
         outcome = await outcome
     return outcome
+
+
+def _statuses(
+    status: Status | str | Iterable[Status | str] | None,
+) -> list[Status] | None:
+    if status is None:
+        return None
+    if isinstance(status, str):  # Status is a str too
+        return [Status(status)]
+    return [Status(s) for s in status]
 
 
 def _dumps(value: Any) -> str:

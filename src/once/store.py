@@ -6,9 +6,11 @@ import enum
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS effects (
@@ -177,6 +179,49 @@ class SQLiteStore:
             (status.value, result, error, now, record.key, record.status.value, record.updated_at),
         )
         return now if cur.rowcount == 1 else None
+
+    def records(
+        self, statuses: Iterable[Status] | None = None, limit: int | None = None
+    ) -> list[Record]:
+        """Records, most recently updated first."""
+        sql = "SELECT key, status, result, error, args_hash, created_at, updated_at FROM effects"
+        params: list[Any] = []
+        if statuses is not None:
+            values = [Status(s).value for s in statuses]
+            sql += f" WHERE status IN ({','.join('?' * len(values))})"
+            params += values
+        sql += " ORDER BY updated_at DESC, key"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = self._conn().execute(sql, params).fetchall()
+        return [Record(r[0], Status(r[1]), r[2], r[3], r[4], r[5], r[6]) for r in rows]
+
+    def keys_with_prefix(self, prefix: str, limit: int = 2) -> list[str]:
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT key FROM effects WHERE substr(key, 1, ?) = ? ORDER BY key LIMIT ?",
+                (len(prefix), prefix, limit),
+            )
+            .fetchall()
+        )
+        return [r[0] for r in rows]
+
+    def purge(self, older_than: float, statuses: Iterable[Status]) -> int:
+        """Delete records with one of ``statuses`` not updated for ``older_than`` seconds."""
+        values = [Status(s).value for s in statuses]
+        if not values:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than)).isoformat(
+            timespec="microseconds"
+        )
+        marks = ",".join("?" * len(values))
+        cur = self._conn().execute(
+            f"DELETE FROM effects WHERE updated_at < ? AND status IN ({marks})",
+            [cutoff, *values],
+        )
+        return cur.rowcount
 
     def delete(self, key: str) -> bool:
         cur = self._conn().execute("DELETE FROM effects WHERE key = ?", (key,))
