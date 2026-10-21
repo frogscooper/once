@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev]" mcp langchain-core langgraph
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
@@ -38,3 +38,20 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: pytest -q --cov=once --cov-report=term-missing
+
+  integrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp: ["mcp<2", "mcp>=2"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" langchain-core langgraph "${{ matrix.mcp }}"
+      - run: pytest -q tests/test_integrations.py tests/test_integrations_mcp.py tests/test_integrations_langchain.py
+      - run: python examples/langgraph_example.py
+      - run: pytest -q -m heavy tests/test_stress.py
