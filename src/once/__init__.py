@@ -1,6 +1,6 @@
 """Make side-effecting agent tool calls safe to retry."""
 
-from .core import Once
+from .core import NOT_HAPPENED, Once, Verifier
 from .exceptions import (
     EffectError,
     EffectFailed,
@@ -13,6 +13,7 @@ from .key import args_hash, canonical_json, make_key
 from .store import Record, SQLiteStore, Status
 
 __all__ = [
+    "NOT_HAPPENED",
     "EffectError",
     "EffectFailed",
     "EffectPending",
@@ -23,6 +24,7 @@ __all__ = [
     "Record",
     "SQLiteStore",
     "Status",
+    "Verifier",
     "args_hash",
     "canonical_json",
     "make_key",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,12 @@ def db(tmp_path: Path) -> Path:
 @pytest.fixture
 def once(db: Path) -> Once:
     return Once(db)
+
+
+def test_make_key_formula() -> None:
+    expected = hashlib.sha256(b'charge_card{"amount":1000,"customer":"cus_123"}order_456')
+    key = make_key("charge_card", {"customer": "cus_123", "amount": 1000}, scope="order_456")
+    assert key == expected.hexdigest()
 
 
 def test_make_key_is_deterministic_and_scoped() -> None:
