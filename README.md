@@ -47,7 +47,7 @@ Register the decorated function with your agent framework as a normal tool. See 
 
 ## Keys
 
-The key is `sha256(tool_name + canonical_json(args) + scope)` as hex, where `canonical_json` sorts keys and drops whitespace. Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. Arguments must be JSON serializable.
+The key is `sha256(canonical_json([tool_name, args, scope]))` as hex, where `canonical_json` is `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)`. Putting the three parts in one JSON array means they cannot run into each other, so different inputs always give different keys. A scope of `None` and `""` are different. Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. Arguments must be JSON serializable.
 
 The scope is usually a run, order, or step id. Set it with `with once.scope(...)` or pass `scope=` to `execute`. Without a scope, the same call with the same arguments only ever runs once, which is often not what you want for things like "send a reminder".
 
