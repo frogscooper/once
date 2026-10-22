@@ -21,12 +21,7 @@ from once import (
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    return tmp_path / "once.db"
-
-
-@pytest.fixture
-def once(db: Path) -> Once:
+def once(db: str | Path) -> Once:
     return Once(db)
 
 
@@ -73,7 +68,7 @@ def test_gather_same_key_runs_once(once: Once) -> None:
     assert calls == 1
 
 
-def test_gather_across_instances_uses_the_db_claim(db: Path) -> None:
+def test_gather_across_instances_uses_the_db_claim(db: str | Path) -> None:
     calls = 0
 
     async def charge() -> str:
@@ -90,7 +85,7 @@ def test_gather_across_instances_uses_the_db_claim(db: Path) -> None:
     assert calls == 1
 
 
-def test_waiting_on_pending_does_not_block_the_loop(db: Path) -> None:
+def test_waiting_on_pending_does_not_block_the_loop(db: str | Path) -> None:
     owner = Once(db)
     token = owner.store.claim("k", args_hash({"tool": "f", "args": {}}))
     assert token is not None
@@ -279,7 +274,7 @@ def test_execute_rejects_async_functions(once: Once) -> None:
         once.execute(f, key="k")
 
 
-def test_mixed_sync_and_async_on_one_db(db: Path) -> None:
+def test_mixed_sync_and_async_on_one_db(db: str | Path) -> None:
     once = Once(db)
     calls = 0
 
@@ -297,7 +292,7 @@ def test_mixed_sync_and_async_on_one_db(db: Path) -> None:
     assert calls == 1
 
 
-def test_sync_caller_waits_for_async_owner_in_same_process(db: Path) -> None:
+def test_sync_caller_waits_for_async_owner_in_same_process(db: str | Path) -> None:
     once = Once(db)
     started = threading.Event()
     release = threading.Event()
@@ -329,7 +324,7 @@ def test_sync_caller_waits_for_async_owner_in_same_process(db: Path) -> None:
     assert calls == 1
 
 
-def test_async_caller_waits_for_sync_owner_in_same_process(db: Path) -> None:
+def test_async_caller_waits_for_sync_owner_in_same_process(db: str | Path) -> None:
     once = Once(db)
     started = threading.Event()
     calls = 0

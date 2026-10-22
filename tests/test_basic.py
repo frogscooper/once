@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 import pytest
@@ -9,12 +10,7 @@ from once import EffectFailed, KeyConflict, Once, Status, make_key
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    return tmp_path / "once.db"
-
-
-@pytest.fixture
-def once(db: Path) -> Once:
+def once(db: str | Path) -> Once:
     return Once(db)
 
 
@@ -157,7 +153,7 @@ def test_reset_allows_a_rerun(once: Once) -> None:
     assert once.execute(flaky, key="k") == "ok"
 
 
-def test_records_persist_across_instances(db: Path) -> None:
+def test_records_persist_across_instances(db: str | Path) -> None:
     calls = 0
 
     def send() -> list[int]:
@@ -204,3 +200,16 @@ def test_exclude_leaves_params_out_of_the_key(once: Once) -> None:
     assert seen == [a]
     assert once.execute(f, x=1, ctx=b) == 1  # decorated tool keeps its exclude
     assert len(seen) == 1
+
+
+def test_records_and_purge_api(db: str | Path) -> None:
+    with Once(db) as once:
+        once.execute(lambda: 1, key="a")
+        once.execute(lambda: 2, key="b")
+        assert {r.key for r in once.records()} == {"a", "b"}
+        assert once.records(status="pending") == []
+        assert len(once.records(status=["done", Status.FAILED])) == 2
+        assert once.purge(3600) == 0
+        assert once.purge(0, status=[]) == 0
+        time.sleep(0.05)
+        assert once.purge(0) == 2

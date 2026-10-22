@@ -18,12 +18,7 @@ from once import (
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    return tmp_path / "once.db"
-
-
-@pytest.fixture
-def once(db: Path) -> Once:
+def once(db: str | Path) -> Once:
     return Once(db)
 
 
@@ -132,13 +127,13 @@ def test_failed_is_not_verified(once: Once) -> None:
         once.execute(charge, key="k", verify=verify, amount=1)
 
 
-def claim_pending(db: Path, tool: str, args: dict[str, Any]) -> str:
+def claim_pending(db: str | Path, tool: str, args: dict[str, Any]) -> str:
     token = Once(db).store.claim("k", args_hash({"tool": tool, "args": args}))
     assert token is not None
     return token
 
 
-def test_fresh_pending_is_not_verified(db: Path) -> None:
+def test_fresh_pending_is_not_verified(db: str | Path) -> None:
     claim_pending(db, "charge", {"amount": 100})
     charger = Charger(fail_first=False)
 
@@ -154,7 +149,7 @@ def test_fresh_pending_is_not_verified(db: Path) -> None:
     assert charger.calls == 0
 
 
-def test_stale_pending_is_verified_and_old_owner_cannot_overwrite(db: Path) -> None:
+def test_stale_pending_is_verified_and_old_owner_cannot_overwrite(db: str | Path) -> None:
     old_token = claim_pending(db, "charge", {"amount": 100})
     time.sleep(0.05)
     charger = Charger(fail_first=False)
