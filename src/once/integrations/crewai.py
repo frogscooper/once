@@ -24,7 +24,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar, overload
 
-from ..core import Once, Verifier
+from ..core import TTL, Once, Verifier
 from ._wrap import wrap
 
 P = ParamSpec("P")
@@ -42,6 +42,7 @@ def once_tool(
     *,
     name: str | None = None,
     timeout: float | None = None,
+    ttl: TTL | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
@@ -54,6 +55,7 @@ def once_tool(
     *,
     name: str | None = None,
     timeout: float | None = None,
+    ttl: TTL | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
 ) -> Any:
@@ -77,6 +79,7 @@ def once_tool(
             func,
             name=name,
             timeout=timeout,
+            ttl=ttl,
             verify=verify,
             exclude=exclude,
             scope_of=scope_of,
