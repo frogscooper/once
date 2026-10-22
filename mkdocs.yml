@@ -1,0 +1,74 @@
+site_name: once
+site_description: Run side-effecting agent tool calls at most once per idempotency key.
+site_url: https://frogscooper.github.io/once/
+repo_url: https://github.com/frogscooper/once
+repo_name: frogscooper/once
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.footer
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_source: false
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            filters: ["!^_"]
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts: concepts.md
+  - Expiry and gc: ttl.md
+  - Backends: backends.md
+  - Verifiers: verifiers.md
+  - Hooks and OpenTelemetry: hooks.md
+  - Integrations:
+      - integrations/index.md
+      - MCP: integrations/mcp.md
+      - LangChain and LangGraph: integrations/langchain.md
+      - OpenAI Agents SDK: integrations/openai-agents.md
+      - Pydantic AI: integrations/pydantic-ai.md
+      - CrewAI: integrations/crewai.md
+  - CLI: cli.md
+  - Why not just X: why-not.md
+  - API reference:
+      - reference/once.md
+      - reference/stores.md
+      - reference/verifiers.md
+      - reference/integrations.md
