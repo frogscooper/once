@@ -28,9 +28,20 @@ graph.invoke(inputs, config={"configurable": {"thread_id": "order_456"}})
 
 ```python
 once_tool(
-    once, fn=None, /, *, name=None, timeout=None, verify=None, scope_key="thread_id", config_arg=None
+    once,
+    fn=None,
+    /,
+    *,
+    name=None,
+    timeout=None,
+    ttl=None,
+    verify=None,
+    scope_key="thread_id",
+    config_arg=None,
 )
 ```
+
+`name`, `timeout`, `ttl` and `verify` work as in `@once.tool`; `ttl` is seconds or a `timedelta` (see [Expiry and gc](../ttl.md)).
 
 The scope is, in order:
 

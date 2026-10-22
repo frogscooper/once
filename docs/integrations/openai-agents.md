@@ -4,6 +4,8 @@
 pip install 'agent-once[openai-agents]'
 ```
 
+This installs `openai-agents>=0.8.4`. Older releases don't give tools `ctx.run_config`, so `RunConfig.group_id` can't be read and calls from different runs with the same arguments would silently share one key.
+
 `once.integrations.openai_agents.once_tool` wraps a function tool. Put `@function_tool` on top. The SDK passes a `ToolContext` (or `RunContextWrapper`) as the first parameter and hides it from the model:
 
 ```python
@@ -63,5 +65,7 @@ The context argument is found by its `ToolContext` or `RunContextWrapper` annota
 
 !!! note
     The `openai-agents` and `crewai` extras can't be installed together: the Agents SDK needs `openai>=3` and CrewAI pins `openai<3`.
+
+An `idempotency_key` parameter gets the computed key and is hidden from the model, as with the other helpers. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
 
 `examples/openai_agents_example.py` runs offline with a scripted model.

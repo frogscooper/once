@@ -4,7 +4,9 @@
 pip install 'agent-once[pydantic-ai]'
 ```
 
-This installs `pydantic-ai-slim`. `once.integrations.pydantic_ai.once_tool` wraps a tool function. Put `@agent.tool` on top, or pass the function in `Agent(tools=[...])`. Pydantic AI passes `RunContext` as the first parameter and hides it from the model:
+This installs `pydantic-ai-slim>=1.89`. Older releases have no `RunContext.conversation_id`, so calls from different runs with the same arguments would silently share one key.
+
+`once.integrations.pydantic_ai.once_tool` wraps a tool function. Put `@agent.tool` on top, or pass the function in `Agent(tools=[...])`. Pydantic AI passes `RunContext` as the first parameter and hides it from the model:
 
 ```python
 from pydantic_ai import Agent, RunContext
@@ -53,5 +55,7 @@ The scope is, in order:
 Pass your own `conversation_id` to `agent.run`. Without one, Pydantic AI makes up a fresh id for every run, and each run gets its own key. `run_id` stays the same when a durable workflow replays a run. Tool call ids and retry counts are not used.
 
 The context argument is found by its `RunContext` annotation or the names `ctx` and `context`; `context_arg=` names it explicitly. It is left out of the key.
+
+An `idempotency_key` parameter gets the computed key and is hidden from the model. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
 
 `examples/pydantic_ai_example.py` runs offline with a `FunctionModel`.

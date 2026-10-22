@@ -28,8 +28,21 @@ async def charge_card(
 On newer `mcp` releases, import `Context` from `mcp.server.mcpserver` instead.
 
 ```python
-once_tool(once, fn=None, /, *, name=None, timeout=None, verify=None, scope_arg=None, context_arg=None)
+once_tool(
+    once,
+    fn=None,
+    /,
+    *,
+    name=None,
+    timeout=None,
+    ttl=None,
+    verify=None,
+    scope_arg=None,
+    context_arg=None,
+)
 ```
+
+`name`, `timeout`, `ttl` and `verify` work as in `@once.tool`; `ttl` is seconds or a `timedelta` (see [Expiry and gc](../ttl.md)).
 
 The scope is, in order:
 
@@ -37,7 +50,7 @@ The scope is, in order:
 2. the MCP session id, from the `mcp-session-id` header of the request, found through the tool's `Context` argument.
 3. the enclosing `once.scope()`, if any.
 
-The context argument is found by its `Context` annotation or the names `ctx` and `context`; `context_arg=` names it explicitly. It is left out of the key, as is `idempotency_key`, which gets the computed key like with `@once.tool`.
+The context argument is found by its `Context` annotation or the names `ctx` and `context`; `context_arg=` names it explicitly. It is left out of the key. An `idempotency_key` parameter gets the computed key like with `@once.tool`, and is hidden from the tool's signature so the model is never asked for it.
 
 A session id only scopes one client session. Retries from a reconnected client get a new session, so for effects that must happen once per order or per job, use `scope_arg`.
 
