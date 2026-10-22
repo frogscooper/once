@@ -47,4 +47,4 @@ For a `BaseTool` subclass, decorate `_run` (or `_arun`) and pass `name=`. `self`
 
 An `idempotency_key` parameter gets the computed key and is hidden from the model. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
 
-`examples/crewai_example.py` runs offline with a fake model.
+`examples/crewai_example.py` runs offline. It calls the tool directly, the way a retried task would.

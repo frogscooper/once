@@ -47,7 +47,7 @@ PostgresStore(dsn, *, table="once_effects", create=True, connect_timeout=10.0)
 ```
 
 - `dsn` is a libpq connection string or `postgresql://` URL.
-- `table` may be schema qualified, like `"agent.effects"`. Anything else with dots in it raises `ValueError`.
+- `table` may be schema qualified, like `"agent.effects"`. The schema must already exist. Anything else with dots in it raises `ValueError`.
 - `create=False` skips `CREATE TABLE`, for a table you manage yourself. It still runs the one-time `expires_at` migration on an older table (`ALTER TABLE ... ADD COLUMN` and `CREATE INDEX`), so the database user needs those rights once, or you add the column and index yourself.
 - `connect_timeout` is in seconds.
 

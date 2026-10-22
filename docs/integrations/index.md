@@ -14,7 +14,7 @@ Every helper is called as `once_tool(once, fn, ...)` or used as a decorator, `@o
 
 The `openai-agents` extra needs `openai-agents>=0.8.4` and `pydantic-ai` needs `pydantic-ai-slim>=1.89`. Older releases don't expose `RunConfig` to tools or `RunContext.conversation_id`, and the helpers would silently fall back to one shared key.
 
-None of these modules import the framework when `once` is imported; the import fails only when you use one without its package.
+None of these modules import the framework itself, so they import fine without it.
 
 !!! note
     The `crewai` and `openai-agents` extras can't be installed in one environment: CrewAI pins `openai<3` and the OpenAI Agents SDK needs `openai>=3`. Use separate environments if you need both.

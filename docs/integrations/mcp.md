@@ -7,12 +7,12 @@ pip install 'agent-once[mcp]'
 `once.integrations.mcp.once_tool` wraps an MCP server tool. Register the result with your server as usual:
 
 ```python
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 
 from once import Once
 from once.integrations.mcp import once_tool
 
-mcp = FastMCP("payments")
+mcp = MCPServer("payments")
 once = Once("once.db")
 
 
@@ -25,7 +25,7 @@ async def charge_card(
     return {"charge_id": charge.id}
 ```
 
-On newer `mcp` releases, import `Context` from `mcp.server.mcpserver` instead.
+This is `mcp` 2.x. On 1.x the server class is `FastMCP`: `from mcp.server.fastmcp import Context, FastMCP`.
 
 ```python
 once_tool(
