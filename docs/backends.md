@@ -48,7 +48,7 @@ PostgresStore(dsn, *, table="once_effects", create=True, connect_timeout=10.0)
 
 - `dsn` is a libpq connection string or `postgresql://` URL.
 - `table` may be schema qualified, like `"agent.effects"`. Anything else with dots in it raises `ValueError`.
-- `create=False` skips `CREATE TABLE`, for a table you manage yourself.
+- `create=False` skips `CREATE TABLE`, for a table you manage yourself. It still runs the one-time `expires_at` migration on an older table (`ALTER TABLE ... ADD COLUMN` and `CREATE INDEX`), so the database user needs those rights once, or you add the column and index yourself.
 - `connect_timeout` is in seconds.
 
 Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `ttl`, `aexecute`, `reset`, `records` and `purge`. The claim is the same `INSERT ... ON CONFLICT DO NOTHING`, and finishing or taking over a record is an `UPDATE` that only matches if the row is unchanged, so the database decides who runs a call, not anything in your process.

@@ -45,4 +45,6 @@ For a `BaseTool` subclass, decorate `_run` (or `_arun`) and pass `name=`. `self`
 !!! note
     The `crewai` and `openai-agents` extras can't be installed together: CrewAI pins `openai<3` and the OpenAI Agents SDK needs `openai>=3`.
 
+An `idempotency_key` parameter gets the computed key and is hidden from the model. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
+
 `examples/crewai_example.py` runs offline with a fake model.
