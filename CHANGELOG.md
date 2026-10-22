@@ -12,6 +12,8 @@ First release.
 - `Once.close()`, and `Once` works as a context manager.
 - `exclude=` on `once.tool` to leave parameters out of the key.
 - `once.integrations.mcp` and `once.integrations.langchain` decorators, with examples.
+- `once.integrations.openai_agents`, `once.integrations.pydantic_ai` and `once.integrations.crewai` decorators, with examples and extras. The `crewai` and `openai-agents` extras can't be installed together. Pydantic AI tools take their scope from `scope_arg`, then `scope_from(ctx)`, then the enclosing `once.scope()` (read with `current_scope()`), then `ctx.conversation_id`, or `ctx.run_id` with `scope="run"`.
+- The framework helpers take `ttl=`.
 - `PostgresStore` for workers on several machines, behind the `postgres` extra. Use `Once("postgresql://...")` or `Once(store=PostgresStore(dsn, table=...))`. The CLI accepts a Postgres URL for `--db` and has a `--table` option.
 - `Store` protocol, so `Once(store=...)` takes any backend that implements it.
 - `once.verifiers`: `stripe_verifier` and `stripe_params` for Stripe charges, PaymentIntents and refunds (`stripe` extra, or pass a client), and `http_verifier` for any API that can look an effect up by key. `stripe_verifier` falls back to listing when search isn't available to the account.
