@@ -6,7 +6,7 @@ import enum
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,9 +20,12 @@ CREATE TABLE IF NOT EXISTS effects (
     error TEXT,
     args_hash TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    expires_at TEXT -- done records with a ttl; NULL means never
 )
 """
+
+_COLUMNS = "key, status, result, error, args_hash, created_at, updated_at, expires_at"
 
 
 class Status(str, enum.Enum):
@@ -41,11 +44,18 @@ class Record:
     args_hash: str | None
     created_at: str
     updated_at: str
+    expires_at: str | None = None
 
     def age(self) -> float:
         """Seconds since the record was last updated."""
         updated = datetime.fromisoformat(self.updated_at)
         return (datetime.now(timezone.utc) - updated).total_seconds()
+
+    def expired(self) -> bool:
+        """True for a done record whose ttl has run out."""
+        return (
+            self.status is Status.DONE and self.expires_at is not None and self.expires_at <= _now()
+        )
 
 
 def _now() -> str:
@@ -61,6 +71,12 @@ def _next_token(previous: str) -> str:
         later = datetime.fromisoformat(previous) + timedelta(microseconds=1)
         now = later.isoformat(timespec="microseconds")
     return now
+
+
+def expiry(ttl: float) -> str:
+    """The expires_at value for a record that finishes now with this ttl."""
+    then = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    return then.isoformat(timespec="microseconds")
 
 
 def _cutoff(older_than: float) -> str:
@@ -89,6 +105,7 @@ class Store(Protocol):
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> bool:
         """Move a pending record we own to its final state."""
         ...
@@ -99,8 +116,16 @@ class Store(Protocol):
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> str | None:
         """Change a record only if it is unchanged since it was read."""
+        ...
+
+    def renew(self, record: Record, args_hash: str | None) -> str | None:
+        """Turn an expired record back into a fresh pending one, if it is unchanged.
+
+        Returns an owner token, or None if someone else changed it first.
+        """
         ...
 
     def records(
@@ -110,6 +135,8 @@ class Store(Protocol):
     def keys_with_prefix(self, prefix: str, limit: int = 2) -> list[str]: ...
 
     def purge(self, older_than: float, statuses: Iterable[Status]) -> int: ...
+
+    def purge_expired(self) -> int: ...
 
     def delete(self, key: str) -> bool: ...
 
@@ -159,11 +186,30 @@ class SQLiteStore:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(SCHEMA)
+                self._migrate(conn)
                 return
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc) or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        # Databases made before ttl support have no expires_at column. The
+        # write lock keeps two processes from both adding it.
+        if self._has_expires_at(conn):
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not self._has_expires_at(conn):
+                conn.execute("ALTER TABLE effects ADD COLUMN expires_at TEXT")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _has_expires_at(conn: sqlite3.Connection) -> bool:
+        return any(row[1] == "expires_at" for row in conn.execute("PRAGMA table_info(effects)"))
 
     def _conn(self) -> sqlite3.Connection:
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
@@ -205,17 +251,9 @@ class SQLiteStore:
 
     def get(self, key: str) -> Record | None:
         row = (
-            self._conn()
-            .execute(
-                "SELECT key, status, result, error, args_hash, created_at, updated_at "
-                "FROM effects WHERE key = ?",
-                (key,),
-            )
-            .fetchone()
+            self._conn().execute(f"SELECT {_COLUMNS} FROM effects WHERE key = ?", (key,)).fetchone()
         )
-        if row is None:
-            return None
-        return Record(row[0], Status(row[1]), row[2], row[3], row[4], row[5], row[6])
+        return None if row is None else to_record(row)
 
     def finish(
         self,
@@ -224,12 +262,13 @@ class SQLiteStore:
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> bool:
         """Move a pending record we own to its final state."""
         cur = self._conn().execute(
-            "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ? "
+            "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ?, expires_at = ? "
             "WHERE key = ? AND status = ? AND updated_at = ?",
-            (status.value, result, error, _now(), key, Status.PENDING.value, token),
+            (status.value, result, error, _now(), expires_at, key, Status.PENDING.value, token),
         )
         return cur.rowcount == 1
 
@@ -239,6 +278,7 @@ class SQLiteStore:
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> str | None:
         """Change a record only if it is unchanged since it was read.
 
@@ -246,9 +286,40 @@ class SQLiteStore:
         """
         now = _next_token(record.updated_at)
         cur = self._conn().execute(
-            "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ? "
+            "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ?, expires_at = ? "
             "WHERE key = ? AND status = ? AND updated_at = ?",
-            (status.value, result, error, now, record.key, record.status.value, record.updated_at),
+            (
+                status.value,
+                result,
+                error,
+                now,
+                expires_at,
+                record.key,
+                record.status.value,
+                record.updated_at,
+            ),
+        )
+        return now if cur.rowcount == 1 else None
+
+    def renew(self, record: Record, args_hash: str | None) -> str | None:
+        """Turn an expired record back into a fresh pending one, if it is unchanged.
+
+        Returns an owner token, or None if someone else changed it first.
+        """
+        now = _next_token(record.updated_at)
+        cur = self._conn().execute(
+            "UPDATE effects SET status = ?, result = NULL, error = NULL, args_hash = ?, "
+            "created_at = ?, updated_at = ?, expires_at = NULL "
+            "WHERE key = ? AND status = ? AND updated_at = ?",
+            (
+                Status.PENDING.value,
+                args_hash,
+                now,
+                now,
+                record.key,
+                record.status.value,
+                record.updated_at,
+            ),
         )
         return now if cur.rowcount == 1 else None
 
@@ -256,7 +327,7 @@ class SQLiteStore:
         self, statuses: Iterable[Status] | None = None, limit: int | None = None
     ) -> list[Record]:
         """Records, most recently updated first."""
-        sql = "SELECT key, status, result, error, args_hash, created_at, updated_at FROM effects"
+        sql = f"SELECT {_COLUMNS} FROM effects"
         params: list[Any] = []
         if statuses is not None:
             values = [Status(s).value for s in statuses]
@@ -267,7 +338,7 @@ class SQLiteStore:
             sql += " LIMIT ?"
             params.append(limit)
         rows = self._conn().execute(sql, params).fetchall()
-        return [Record(r[0], Status(r[1]), r[2], r[3], r[4], r[5], r[6]) for r in rows]
+        return [to_record(r) for r in rows]
 
     def keys_with_prefix(self, prefix: str, limit: int = 2) -> list[str]:
         rows = (
@@ -293,6 +364,18 @@ class SQLiteStore:
         )
         return cur.rowcount
 
+    def purge_expired(self) -> int:
+        """Delete done records whose ttl has run out."""
+        cur = self._conn().execute(
+            "DELETE FROM effects WHERE status = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+            (Status.DONE.value, _now()),
+        )
+        return cur.rowcount
+
     def delete(self, key: str) -> bool:
         cur = self._conn().execute("DELETE FROM effects WHERE key = ?", (key,))
         return cur.rowcount == 1
+
+
+def to_record(row: Sequence[Any]) -> Record:
+    return Record(row[0], Status(row[1]), row[2], row[3], row[4], row[5], row[6], row[7])

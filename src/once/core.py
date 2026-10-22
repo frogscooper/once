@@ -7,18 +7,20 @@ import enum
 import functools
 import inspect
 import json
+import math
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Collection, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast, overload
 
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
 from .key import args_hash, canonical_json, make_key
-from .store import Record, Status, Store, open_store
+from .store import Record, Status, Store, expiry, open_store
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -31,7 +33,15 @@ Verifier = Callable[[str, dict[str, Any]], Any]
 For async tools it may also be an async function.
 """
 
+TTL = float | timedelta
+"""Seconds (int or float) or a timedelta. math.inf means never expire."""
+
 _current_scope: ContextVar[str | None] = ContextVar("once_scope", default=None)
+
+
+def current_scope() -> str | None:
+    """The scope set by the innermost ``once.scope(...)`` block, or None."""
+    return _current_scope.get()
 
 
 class _NotHappened(enum.Enum):
@@ -65,6 +75,19 @@ class _Call:
     args_hash: str
     args: dict[str, Any]
     invoke: Callable[[], Any]
+
+
+def _ttl(ttl: TTL | None) -> float | None:
+    if ttl is None:
+        return None
+    seconds = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
+    if math.isnan(seconds) or seconds <= 0:
+        raise ValueError(f"ttl must be positive, got {ttl!r}")
+    return seconds
+
+
+def _expiry(ttl: float | None) -> str | None:
+    return None if ttl is None or math.isinf(ttl) else expiry(ttl)
 
 
 def _describe(exc: BaseException) -> str:
@@ -109,6 +132,9 @@ class Once:
     stale_after: seconds after which a pending record counts as abandoned and
         is handed to verify, if the call has one. None means never.
     busy_timeout: SQLite busy timeout in seconds.
+    ttl: default time to live for done records, in seconds or as a timedelta.
+        Once it runs out, the next call with the same key runs again. Tools and
+        calls can set their own. None (the default) means records never expire.
     """
 
     def __init__(
@@ -121,6 +147,7 @@ class Once:
         unknown_on: tuple[type[BaseException], ...] = (TimeoutError,),
         stale_after: float | None = None,
         busy_timeout: float = 5.0,
+        ttl: TTL | None = None,
     ) -> None:
         if store is not None and path is not None:
             raise TypeError("pass path or store, not both")
@@ -131,6 +158,7 @@ class Once:
         self.poll_interval = poll_interval
         self.unknown_on = unknown_on
         self.stale_after = stale_after
+        self.ttl = _ttl(ttl)
         self._locks: dict[str, tuple[threading.Lock, int]] = {}
         self._alocks: dict[tuple[int, str], tuple[asyncio.Lock, int]] = {}
         self._locks_guard = threading.Lock()
@@ -159,6 +187,7 @@ class Once:
         timeout: float | None = None,
         verify: Verifier | None = None,
         exclude: Collection[str] = (),
+        ttl: TTL | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
     def tool(
@@ -169,6 +198,7 @@ class Once:
         timeout: float | None = None,
         verify: Verifier | None = None,
         exclude: Collection[str] = (),
+        ttl: TTL | None = None,
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
@@ -180,8 +210,12 @@ class Once:
 
         ``exclude`` names parameters to leave out of the key, such as a
         framework context object. They are still passed to the function.
+
+        ``ttl`` (seconds or a timedelta) makes a done result expire, after which
+        the same call runs again. It overrides the Once default.
         """
         skip = frozenset(exclude)
+        seconds = _ttl(ttl)
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
             tool_name = name or func.__name__
@@ -191,18 +225,18 @@ class Once:
                 @functools.wraps(func)
                 async def awrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
                     call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
-                    return await self._arun(call, True, timeout, verify)
+                    return await self._arun(call, True, timeout, verify, self._pick(seconds))
 
-                awrapper.__once_tool__ = (func, tool_name, verify, skip)  # type: ignore[attr-defined]
+                awrapper.__once_tool__ = (func, tool_name, verify, skip, seconds)  # type: ignore[attr-defined]
                 return cast(Callable[P, R], awrapper)
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
                 call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
-                result: R = self._run(call, timeout, verify)
+                result: R = self._run(call, timeout, verify, self._pick(seconds))
                 return result
 
-            wrapper.__once_tool__ = (func, tool_name, verify, skip)  # type: ignore[attr-defined]
+            wrapper.__once_tool__ = (func, tool_name, verify, skip, seconds)  # type: ignore[attr-defined]
             return wrapper
 
         if fn is not None:
@@ -218,20 +252,21 @@ class Once:
         scope: str | None = None,
         timeout: float | None = None,
         verify: Verifier | None = None,
+        ttl: TTL | None = None,
         **kwargs: Any,
     ) -> Any:
         """Call ``fn(**kwargs)`` at most once for ``key``.
 
         Without ``key``, the key is make_key(tool_name, kwargs, scope). ``fn`` may
         be a plain function or one decorated with ``tool``, in which case its
-        name and verify are used unless given here. Use aexecute for async
+        name, verify and ttl are used unless given here. Use aexecute for async
         functions.
         """
-        func, name, verify, skip = self._unwrap(fn, tool_name, verify)
+        func, name, verify, skip, seconds = self._unwrap(fn, tool_name, verify, ttl)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
         call = self._prepare(func, name, (), kwargs, key, scope, skip)
-        return self._run(call, timeout, verify)
+        return self._run(call, timeout, verify, seconds)
 
     async def aexecute(
         self,
@@ -242,6 +277,7 @@ class Once:
         scope: str | None = None,
         timeout: float | None = None,
         verify: Verifier | None = None,
+        ttl: TTL | None = None,
         **kwargs: Any,
     ) -> Any:
         """Async version of execute.
@@ -249,9 +285,10 @@ class Once:
         ``fn`` may be async or plain; a plain function runs in a worker thread.
         ``verify`` may be async or plain.
         """
-        func, name, verify, skip = self._unwrap(fn, tool_name, verify)
+        func, name, verify, skip, seconds = self._unwrap(fn, tool_name, verify, ttl)
         call = self._prepare(func, name, (), kwargs, key, scope, skip)
-        return await self._arun(call, inspect.iscoroutinefunction(func), timeout, verify)
+        is_async = inspect.iscoroutinefunction(func)
+        return await self._arun(call, is_async, timeout, verify, seconds)
 
     def close(self) -> None:
         """Close the store's connections. The instance reconnects if used again."""
@@ -275,17 +312,27 @@ class Once:
 
     def purge(
         self,
-        older_than: float,
+        older_than: float | None = None,
         status: Status | str | Iterable[Status | str] = Status.DONE,
+        *,
+        expired: bool = False,
     ) -> int:
-        """Delete records not updated for ``older_than`` seconds. Returns the count.
+        """Delete old records. Returns the count.
 
-        Only done records by default. Purging pending or unknown records lets
-        those calls run again, so pass them explicitly if that is what you want.
+        ``older_than`` deletes records not updated for that many seconds, only
+        done ones by default. Purging pending or unknown records lets those
+        calls run again, so pass them explicitly if that is what you want.
+        ``expired=True`` deletes done records whose ttl has run out. Pass
+        either or both.
         """
-        statuses = _statuses(status)
-        assert statuses is not None
-        return self.store.purge(older_than, statuses)
+        if older_than is None and not expired:
+            raise TypeError("pass older_than, expired=True, or both")
+        count = self.store.purge_expired() if expired else 0
+        if older_than is not None:
+            statuses = _statuses(status)
+            assert statuses is not None
+            count += self.store.purge(older_than, statuses)
+        return count
 
     def reset(self, key: str) -> bool:
         """Delete the record for ``key`` so the next call runs again.
@@ -298,18 +345,28 @@ class Once:
     # shared internals
 
     def _unwrap(
-        self, fn: Callable[..., Any], tool_name: str | None, verify: Verifier | None
-    ) -> tuple[Callable[..., Any], str, Verifier | None, frozenset[str]]:
+        self,
+        fn: Callable[..., Any],
+        tool_name: str | None,
+        verify: Verifier | None,
+        ttl: TTL | None,
+    ) -> tuple[Callable[..., Any], str, Verifier | None, frozenset[str], float | None]:
         func: Callable[..., Any] = fn
         name = tool_name
+        seconds = _ttl(ttl)
         marker = getattr(fn, "__once_tool__", None)
         if marker is not None:
-            func, default_name, default_verify, skip = marker
+            func, default_name, default_verify, skip, default_ttl = marker
             name = name or default_name
             verify = verify or default_verify
+            seconds = default_ttl if seconds is None else seconds
         else:
             skip = frozenset()
-        return func, str(name or getattr(func, "__name__", "tool")), verify, skip
+        name = str(name or getattr(func, "__name__", "tool"))
+        return func, name, verify, skip, self._pick(seconds)
+
+    def _pick(self, ttl: float | None) -> float | None:
+        return self.ttl if ttl is None else ttl
 
     def _prepare(
         self,
@@ -386,6 +443,14 @@ class Once:
                 self._register(record.key, owner)
             return token
 
+    def _renew(self, record: Record, h: str, owner: int | None = None) -> str | None:
+        """Claim an expired record. Only one caller wins, the rest see it pending."""
+        with self._inflight_guard:
+            token = self.store.renew(record, h)
+            if token is not None:
+                self._register(record.key, owner)
+            return token
+
     def _register(self, key: str, owner: int | None) -> None:
         is_async = owner is not None
         thread = owner if owner is not None else threading.get_ident()
@@ -420,14 +485,16 @@ class Once:
                 else:
                     self._locks[key] = (lock, count - 1)
 
-    def _run(self, call: _Call, timeout: float | None, verify: Verifier | None) -> Any:
+    def _run(
+        self, call: _Call, timeout: float | None, verify: Verifier | None, ttl: float | None
+    ) -> Any:
         key, h = call.key, call.args_hash
         with self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = self._claim(key, h)
                 if token is not None:
-                    return self._run_owned(key, token, call.invoke, timeout)
+                    return self._run_owned(key, token, call.invoke, timeout, ttl)
                 if local is not None and not (
                     local.is_async and local.thread == threading.get_ident()
                 ):
@@ -438,6 +505,12 @@ class Once:
                 record = self._read_settled(key)
                 if record is None:
                     continue  # deleted between claim and read
+                if record.expired():
+                    # As if it had been purged, so the args may differ too.
+                    token = self._renew(record, h)
+                    if token is not None:
+                        return self._run_owned(key, token, call.invoke, timeout, ttl)
+                    continue
                 if record.args_hash != h:
                     raise KeyConflict(key, record.args_hash, h)
                 if record.status is Status.DONE:
@@ -448,10 +521,11 @@ class Once:
                 if outcome is NOT_HAPPENED:
                     token = self._take_pending(record)
                     if token is not None:
-                        return self._run_owned(key, token, call.invoke, timeout)
+                        return self._run_owned(key, token, call.invoke, timeout, ttl)
                     continue
                 payload = _dumps(outcome)
-                if self.store.take(record, Status.DONE, result=payload) is not None:
+                done = self.store.take(record, Status.DONE, payload, expires_at=_expiry(ttl))
+                if done is not None:
                     return _loads(payload)
             raise _error_for(key, h, record)
 
@@ -467,15 +541,25 @@ class Once:
         return record
 
     def _run_owned(
-        self, key: str, token: str, call: Callable[[], Any], timeout: float | None
+        self,
+        key: str,
+        token: str,
+        call: Callable[[], Any],
+        timeout: float | None,
+        ttl: float | None,
     ) -> Any:
         try:
-            return self._run_owned_inner(key, token, call, timeout)
+            return self._run_owned_inner(key, token, call, timeout, ttl)
         finally:
             self._release(key)
 
     def _run_owned_inner(
-        self, key: str, token: str, call: Callable[[], Any], timeout: float | None
+        self,
+        key: str,
+        token: str,
+        call: Callable[[], Any],
+        timeout: float | None,
+        ttl: float | None,
     ) -> Any:
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
@@ -493,7 +577,7 @@ class Once:
                 key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
             )
             raise EffectUnknown(self._record(key)) from exc
-        self.store.finish(key, token, Status.DONE, result=payload)
+        self.store.finish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
         return _loads(payload)
 
     # async path
@@ -521,7 +605,12 @@ class Once:
                     self._alocks[slot] = (lock, count - 1)
 
     async def _arun(
-        self, call: _Call, is_async: bool, timeout: float | None, verify: Verifier | None
+        self,
+        call: _Call,
+        is_async: bool,
+        timeout: float | None,
+        verify: Verifier | None,
+        ttl: float | None,
     ) -> Any:
         key, h = call.key, call.args_hash
         loop_thread = threading.get_ident()
@@ -530,13 +619,20 @@ class Once:
             for _ in range(_MAX_ROUNDS):
                 token, local = await asyncio.to_thread(self._claim, key, h, loop_thread)
                 if token is not None:
-                    return await self._arun_owned(key, token, call.invoke, is_async, timeout)
+                    return await self._arun_owned(key, token, call.invoke, is_async, timeout, ttl)
                 if local is not None:
                     while not local.done.is_set():
                         await asyncio.sleep(self.poll_interval)
                     continue
                 record = await self._aread_settled(key)
                 if record is None:
+                    continue
+                if record.expired():
+                    token = await asyncio.to_thread(self._renew, record, h, loop_thread)
+                    if token is not None:
+                        return await self._arun_owned(
+                            key, token, call.invoke, is_async, timeout, ttl
+                        )
                     continue
                 if record.args_hash != h:
                     raise KeyConflict(key, record.args_hash, h)
@@ -548,10 +644,14 @@ class Once:
                 if outcome is NOT_HAPPENED:
                     token = await asyncio.to_thread(self._take_pending, record, loop_thread)
                     if token is not None:
-                        return await self._arun_owned(key, token, call.invoke, is_async, timeout)
+                        return await self._arun_owned(
+                            key, token, call.invoke, is_async, timeout, ttl
+                        )
                     continue
                 payload = _dumps(outcome)
-                taken = await asyncio.to_thread(self.store.take, record, Status.DONE, payload, None)
+                taken = await asyncio.to_thread(
+                    self.store.take, record, Status.DONE, payload, None, _expiry(ttl)
+                )
                 if taken is not None:
                     return _loads(payload)
             raise _error_for(key, h, record)
@@ -573,10 +673,11 @@ class Once:
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> None:
         # Shielded so the outcome is still written if we get cancelled again.
         await asyncio.shield(
-            asyncio.to_thread(self.store.finish, key, token, status, result, error)
+            asyncio.to_thread(self.store.finish, key, token, status, result, error, expires_at)
         )
 
     async def _arun_owned(
@@ -586,9 +687,10 @@ class Once:
         invoke: Callable[[], Any],
         is_async: bool,
         timeout: float | None,
+        ttl: float | None,
     ) -> Any:
         try:
-            return await self._arun_owned_inner(key, token, invoke, is_async, timeout)
+            return await self._arun_owned_inner(key, token, invoke, is_async, timeout, ttl)
         finally:
             self._release(key)
 
@@ -599,6 +701,7 @@ class Once:
         invoke: Callable[[], Any],
         is_async: bool,
         timeout: float | None,
+        ttl: float | None,
     ) -> Any:
         raised: list[BaseException] = []
 
@@ -637,7 +740,7 @@ class Once:
                 key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
             )
             raise EffectUnknown(await asyncio.to_thread(self._record, key)) from exc
-        await self._afinish(key, token, Status.DONE, result=payload)
+        await self._afinish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
         return _loads(payload)
 
 
