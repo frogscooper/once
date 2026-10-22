@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS effects (
 )
 """
 
+# Partial, so it only holds records with a ttl. Used by purge_expired.
+EXPIRES_INDEX = (
+    "CREATE INDEX IF NOT EXISTS effects_expires_at ON effects (expires_at) "
+    "WHERE expires_at IS NOT NULL"
+)
 _COLUMNS = "key, status, result, error, args_hash, created_at, updated_at, expires_at"
 
 
@@ -194,18 +199,25 @@ class SQLiteStore:
                 time.sleep(0.01)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        # Databases made before ttl support have no expires_at column. The
-        # write lock keeps two processes from both adding it.
-        if self._has_expires_at(conn):
+        # Databases made before ttl support have no expires_at column or
+        # index. The write lock keeps two processes from both adding them.
+        if self._migrated(conn):
             return
         conn.execute("BEGIN IMMEDIATE")
         try:
             if not self._has_expires_at(conn):
                 conn.execute("ALTER TABLE effects ADD COLUMN expires_at TEXT")
+            conn.execute(EXPIRES_INDEX)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
+
+    def _migrated(self, conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'effects_expires_at'"
+        ).fetchone()
+        return row is not None and self._has_expires_at(conn)
 
     @staticmethod
     def _has_expires_at(conn: sqlite3.Connection) -> bool:
