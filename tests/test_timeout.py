@@ -10,12 +10,7 @@ from once import EffectUnknown, Once, Status
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    return tmp_path / "once.db"
-
-
-@pytest.fixture
-def once(db: Path) -> Once:
+def once(db: str | Path) -> Once:
     return Once(db)
 
 
@@ -73,7 +68,7 @@ def test_fast_call_under_timeout_succeeds(once: Once) -> None:
     assert once.execute(lambda: "ok", key="k", timeout=2) == "ok"
 
 
-def test_custom_unknown_exceptions(db: Path) -> None:
+def test_custom_unknown_exceptions(db: str | Path) -> None:
     class ConnectionDropped(Exception):
         pass
 

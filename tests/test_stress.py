@@ -59,8 +59,7 @@ print(len(results))
 """
 
 
-def run_stress(tmp_path: Path, procs: int, threads: int, coros: int) -> None:
-    db = tmp_path / "once.db"
+def run_stress(db: str | Path, tmp_path: Path, procs: int, threads: int, coros: int) -> None:
     log = tmp_path / "effects.log"
     Once(db).close()
     script = WORKER.format(
@@ -81,10 +80,10 @@ def run_stress(tmp_path: Path, procs: int, threads: int, coros: int) -> None:
     assert log.read_bytes() == b"x"
 
 
-def test_stress(tmp_path: Path) -> None:
-    run_stress(tmp_path, procs=4, threads=4, coros=5)
+def test_stress(db: str | Path, tmp_path: Path) -> None:
+    run_stress(db, tmp_path, procs=4, threads=4, coros=5)
 
 
 @pytest.mark.heavy
-def test_stress_heavy(tmp_path: Path) -> None:
-    run_stress(tmp_path, procs=12, threads=8, coros=25)
+def test_stress_heavy(db: str | Path, tmp_path: Path) -> None:
+    run_stress(db, tmp_path, procs=12, threads=8, coros=25)

@@ -12,12 +12,7 @@ from once import EffectPending, Once, Status, args_hash
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    return tmp_path / "once.db"
-
-
-@pytest.fixture
-def once(db: Path) -> Once:
+def once(db: str | Path) -> Once:
     return Once(db)
 
 
@@ -52,7 +47,7 @@ def test_threads_with_same_key_run_once(once: Once) -> None:
     assert results == ["ch_1"] * 16
 
 
-def test_threads_with_separate_instances_run_once(db: Path) -> None:
+def test_threads_with_separate_instances_run_once(db: str | Path) -> None:
     calls = 0
     lock = threading.Lock()
     start = threading.Barrier(8, timeout=10)
@@ -102,8 +97,7 @@ except EffectPending:
 """
 
 
-def test_processes_with_same_key_run_once(tmp_path: Path) -> None:
-    db = tmp_path / "once.db"
+def test_processes_with_same_key_run_once(db: str | Path, tmp_path: Path) -> None:
     log = tmp_path / "calls.log"
     Once(db)  # create the schema up front
     script = WORKER.format(src=SRC, db=str(db), log=str(log), start=time.time() + 1.0)
@@ -123,7 +117,7 @@ def test_many_instances_can_open_a_new_file_at_once(tmp_path: Path) -> None:
     for i in range(30):
         db = tmp_path / f"{i}.db"
 
-        def open_store(db: Path = db) -> None:
+        def open_store(db: str | Path = db) -> None:
             try:
                 Once(db)
             except BaseException as exc:
@@ -137,7 +131,7 @@ def test_many_instances_can_open_a_new_file_at_once(tmp_path: Path) -> None:
     assert errors == []
 
 
-def test_pending_raises_without_wait(db: Path) -> None:
+def test_pending_raises_without_wait(db: str | Path) -> None:
     def f() -> int:
         return 1
 
@@ -148,7 +142,7 @@ def test_pending_raises_without_wait(db: Path) -> None:
     assert info.value.record.status is Status.PENDING
 
 
-def test_wait_returns_result_once_pending_finishes(db: Path) -> None:
+def test_wait_returns_result_once_pending_finishes(db: str | Path) -> None:
     h = args_hash({"tool": "f", "args": {}})
     owner = Once(db)
     token = owner.store.claim("k", h)
