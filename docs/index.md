@@ -46,4 +46,4 @@ The import name is `once`. It needs Python 3.10 or newer and has no dependencies
 - [CLI](cli.md): inspect and clean up the database.
 - [Why not just X](why-not.md): Stripe keys, Temporal, a Redis lock.
 
-`once` is at-most-once, not exactly-once. If a process dies after the effect happened but before the result was written, the call is not run again on its own. [Concepts](concepts.md#unknown) explains what happens then and how `verify` closes the gap.
+`once` is at-most-once, not exactly-once. If a process dies after the effect happened but before the result was written, the call is not run again on its own. [Concepts](concepts.md#stale_after) explains what happens then and how `verify` closes the gap.

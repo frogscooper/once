@@ -67,4 +67,4 @@ This adds `opentelemetry-api`. Each call through `execute`, `aexecute` or a deco
 - `once.status`
 - `once.outcome`, one of the outcomes above
 
-Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. The tracer is named `once`. `import once` never imports OpenTelemetry; it is loaded on the first call, and only if it is installed.
+Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured the spans are no-ops. The tracer is named `once`. `import once` never imports OpenTelemetry; it is loaded on the first call, and only if it is installed.

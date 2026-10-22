@@ -88,7 +88,7 @@ with once.scope("order_456"):
     charge_card(1000, "cus_123")
 ```
 
-or per call with `execute(..., scope="order_456")`. Scopes are context variables, so they follow async tasks and nest: the innermost `once.scope()` wins, and `once.current_scope()` returns it (or None). The framework [integrations](integrations/index.md) set the scope from the framework's own run or thread id.
+or per call with `execute(..., scope="order_456")`. Scopes are context variables, so they follow async tasks and nest: the innermost `once.scope()` wins, and `current_scope()` (from `once`) returns it, or None. The framework [integrations](integrations/index.md) set the scope from the framework's own run or thread id.
 
 `None` and `""` are different scopes.
 
@@ -100,7 +100,7 @@ The key is
 sha256(canonical_json([tool_name, args, scope]))
 ```
 
-as hex, where `canonical_json` is `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)`. The three parts go in one JSON array, so no choice of name, arguments or scope can collide with another. `once.make_key(tool_name, args, scope=None)` computes it.
+as hex, where `canonical_json` is `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)`. The three parts go in one JSON array, so no choice of name, arguments or scope can collide with another. `make_key(tool_name, args, scope=None)` (from `once`) computes it.
 
 Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. `@once.tool(exclude=("ctx",))` leaves parameters out of the key; they are still passed to the function.
 
