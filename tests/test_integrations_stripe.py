@@ -27,6 +27,7 @@ class FakeApi:
         self.intents: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str, dict[str, list[str]], dict[str, str]]] = []
         self.fail_next_create = False
+        self.search_error: tuple[int, dict[str, Any]] | None = None
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -42,7 +43,9 @@ class FakeApi:
                 url = urlsplit(self.path)
                 query = parse_qs(url.query)
                 api.requests.append(("GET", url.path, query, dict(self.headers)))
-                if url.path == "/v1/payment_intents/search":
+                if url.path == "/v1/payment_intents/search" and api.search_error:
+                    self._send(*api.search_error)
+                elif url.path == "/v1/payment_intents/search":
                     # search lags: it never sees anything here
                     self._send(200, {"object": "search_result", "data": [], "has_more": False})
                 elif url.path == "/v1/payment_intents":
@@ -116,3 +119,39 @@ def test_real_client_round_trip(api: FakeApi, tmp_path: Path) -> None:
     assert search[2]["query"] == [f"metadata['once_key']:'{key}'"]
     assert any(r[1] == "/v1/payment_intents" and r[0] == "GET" for r in api.requests)
     once.close()
+
+
+def error(message: str) -> dict[str, Any]:
+    return {"error": {"message": message, "type": "invalid_request_error"}}
+
+
+REGION = error("The search feature is temporarily unavailable in your region.")
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "falls_back"),
+    [
+        (400, REGION, True),
+        (403, error("key lacks permission"), True),
+        (400, error("Invalid query"), False),
+        (429, error("Too many requests"), False),
+        (401, error("Invalid API Key"), False),
+    ],
+)
+def test_search_unavailable_uses_the_list(
+    api: FakeApi, status: int, body: dict[str, Any], falls_back: bool
+) -> None:
+    client = stripe.StripeClient(
+        "sk_test_123", base_addresses={"api": api.url}, max_network_retries=0
+    )
+    api.intents.append({"id": "pi_1", "object": "payment_intent", "metadata": {"once_key": "k"}})
+    api.search_error = (status, body)
+    verify = stripe_verifier("payment_intent", client=client)
+    if not falls_back:
+        with pytest.raises(stripe.StripeError):
+            verify("k", {})
+        return
+    assert verify("k", {})["id"] == "pi_1"
+    assert verify("k", {})["id"] == "pi_1"
+    searches = [r for r in api.requests if r[1] == "/v1/payment_intents/search"]
+    assert len(searches) == 1  # not asked again once it said no
