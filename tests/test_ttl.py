@@ -7,6 +7,7 @@ import math
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ import pytest
 
 from once import NOT_HAPPENED, EffectFailed, EffectUnknown, Once, Status, args_hash
 from once.cli import main
-from once.store import Record
+from once.store import Record, SQLiteStore
 
 SHORT = 0.25  # long enough that a slow runner does not expire it early
 
@@ -333,6 +334,7 @@ def test_sqlite_migration(tmp_path: Path) -> None:
     columns = [row[1] for row in conn.execute("PRAGMA table_info(effects)")]
     conn.close()
     assert columns[-1] == "expires_at"
+    assert "effects_expires_at" in sqlite_indexes(path)
 
 
 def test_postgres_migration(pg_schema: str) -> None:
@@ -354,6 +356,98 @@ def test_postgres_migration(pg_schema: str) -> None:
             "WHERE table_name = 'once_effects' AND table_schema = current_schema()"
         )
         assert "expires_at" in {row[0] for row in cur.fetchall()}
+    assert "once_effects_expires_at" in pg_indexes(pg_schema, "once_effects")
+
+
+# The expires_at index, so gc --expired doesn't scan the whole table.
+
+PURGE = "DELETE FROM {table} WHERE status = 'done' AND expires_at IS NOT NULL AND expires_at <= 'x'"
+
+
+def sqlite_indexes(path: Path) -> list[str]:
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def test_sqlite_index_used_by_purge(tmp_path: Path) -> None:
+    path = tmp_path / "once.db"
+    SQLiteStore(path).close()
+    conn = sqlite3.connect(path)
+    plan = " ".join(
+        str(row) for row in conn.execute("EXPLAIN QUERY PLAN " + PURGE.format(table="effects"))
+    )
+    conn.close()
+    assert "effects_expires_at" in plan
+
+
+def test_sqlite_column_without_index_gets_the_index(tmp_path: Path) -> None:
+    # Databases from the first ttl release have the column but no index.
+    path = tmp_path / "ttl.db"
+    SQLiteStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX effects_expires_at")
+    conn.commit()
+    conn.close()
+    SQLiteStore(path).close()
+    assert "effects_expires_at" in sqlite_indexes(path)
+
+
+def pg_indexes(dsn: str, table: str, schema: str | None = None) -> set[str]:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename = %s "
+            "AND schemaname = coalesce(%s, current_schema())",
+            (table, schema),
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
+def test_postgres_index_used_by_purge(pg_schema: str) -> None:
+    import psycopg
+
+    from once.postgres import PostgresStore
+
+    PostgresStore(pg_schema).close()
+    with psycopg.connect(pg_schema, autocommit=True) as conn:
+        conn.execute("SET enable_seqscan = off")
+        rows = conn.execute("EXPLAIN " + PURGE.format(table="once_effects")).fetchall()
+    assert "once_effects_expires_at" in " ".join(row[0] for row in rows)
+
+
+def test_postgres_column_without_index_gets_the_index(pg_schema: str) -> None:
+    import psycopg
+
+    from once.postgres import PostgresStore
+
+    PostgresStore(pg_schema).close()
+    with psycopg.connect(pg_schema, autocommit=True) as conn:
+        conn.execute("DROP INDEX once_effects_expires_at")
+    PostgresStore(pg_schema, create=False).close()
+    assert "once_effects_expires_at" in pg_indexes(pg_schema, "once_effects")
+
+
+def test_postgres_index_on_schema_qualified_table(pg_schema: str) -> None:
+    import psycopg
+
+    from once.postgres import PostgresStore
+
+    other = "once_side_" + uuid.uuid4().hex[:8]
+    with psycopg.connect(pg_schema, autocommit=True) as conn:
+        conn.execute(f"CREATE SCHEMA {other}")
+    try:
+        PostgresStore(pg_schema, table=f"{other}.jobs").close()
+        PostgresStore(pg_schema, table=f"{other}.jobs").close()  # second open is a no-op
+        assert "jobs_expires_at" in pg_indexes(pg_schema, "jobs", other)
+        assert not pg_indexes(pg_schema, "jobs")
+    finally:
+        with psycopg.connect(pg_schema, autocommit=True) as conn:
+            conn.execute(f"DROP SCHEMA {other} CASCADE")
 
 
 def test_postgres_missing_table_with_create_false(pg_schema: str) -> None:

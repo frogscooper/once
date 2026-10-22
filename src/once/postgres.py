@@ -65,6 +65,10 @@ class PostgresStore:
         self.table = table
         self.connect_timeout = connect_timeout
         self._ident = sql.Identifier(*parts)
+        # The index lives in the table's schema, so CREATE INDEX takes the bare
+        # name and the lookup takes the qualified one.
+        self._index = f"{parts[-1]}_expires_at"
+        self._index_name = sql.Identifier(*parts[:-1], self._index)
         self._conn_obj: psycopg.Connection[Any] | None = None
         self._lock = threading.RLock()
         self._setup(create)
@@ -94,18 +98,29 @@ class PostgresStore:
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"once:{self.table}",))
                 if create:
                     conn.execute(self._q(_SCHEMA))
-                # Tables made before ttl support have no expires_at column. Only
-                # ALTER when it is missing, since that needs table ownership.
+                # Tables made before ttl support have no expires_at column or
+                # index. Only change what is missing, since that needs table
+                # ownership.
                 name = self._ident.as_string(conn)
                 row = conn.execute(
                     "SELECT to_regclass(%s) IS NOT NULL, EXISTS (SELECT 1 FROM pg_attribute "
                     "WHERE attrelid = to_regclass(%s) AND attname = 'expires_at' "
-                    "AND NOT attisdropped)",
-                    (name, name),
+                    "AND NOT attisdropped), to_regclass(%s) IS NOT NULL",
+                    (name, name, self._index_name.as_string(conn)),
                 ).fetchone()
-                if row is not None and row[0] and not row[1]:
+                if row is None or not row[0]:
+                    return
+                if not row[1]:
                     conn.execute(
                         self._q("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expires_at TEXT")
+                    )
+                if not row[2]:
+                    # Partial, so it only holds records with a ttl.
+                    conn.execute(
+                        sql.SQL(
+                            "CREATE INDEX IF NOT EXISTS {index} ON {table} (expires_at) "
+                            "WHERE expires_at IS NOT NULL"
+                        ).format(index=sql.Identifier(self._index), table=self._ident)
                     )
 
     def table_exists(self) -> bool:
