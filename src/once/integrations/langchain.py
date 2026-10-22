@@ -22,7 +22,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar, overload
 
-from ..core import Once, Verifier
+from ..core import TTL, Once, Verifier
 from ._wrap import find_param, wrap
 
 P = ParamSpec("P")
@@ -51,6 +51,7 @@ def once_tool(
     *,
     name: str | None = None,
     timeout: float | None = None,
+    ttl: TTL | None = None,
     verify: Verifier | None = None,
     scope_key: str = "thread_id",
     config_arg: str | None = None,
@@ -64,6 +65,7 @@ def once_tool(
     *,
     name: str | None = None,
     timeout: float | None = None,
+    ttl: TTL | None = None,
     verify: Verifier | None = None,
     scope_key: str = "thread_id",
     config_arg: str | None = None,
@@ -89,6 +91,7 @@ def once_tool(
             func,
             name=name,
             timeout=timeout,
+            ttl=ttl,
             verify=verify,
             exclude=exclude,
             scope_of=scope_of,

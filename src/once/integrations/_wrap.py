@@ -7,7 +7,7 @@ import inspect
 from collections.abc import Callable, Collection
 from typing import Any, ParamSpec, TypeVar, cast
 
-from ..core import KEY_PARAM, Once, Verifier
+from ..core import KEY_PARAM, TTL, Once, Verifier
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -24,6 +24,7 @@ def wrap(
     verify: Verifier | None,
     exclude: Collection[str],
     scope_of: ScopeOf,
+    ttl: TTL | None = None,
 ) -> Callable[P, R]:
     """Wrap ``fn`` with once.tool and set the scope from each call's arguments.
 
@@ -31,7 +32,7 @@ def wrap(
     (if any) is used.
     """
     inner: Callable[..., Any] = once.tool(
-        name=name, timeout=timeout, verify=verify, exclude=exclude
+        name=name, timeout=timeout, verify=verify, exclude=exclude, ttl=ttl
     )(fn)
     sig = inspect.signature(fn)
     # Hide idempotency_key from the framework so it is not offered to the model.
