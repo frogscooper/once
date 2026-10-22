@@ -1,53 +1,62 @@
 """Charge a card at most once per order, even if the agent retries the tool call.
 
-FakeStripe stands in for the real `stripe` module. Its first request times out
-after the charge was made, so the record becomes unknown. On the retry, verify
-finds the charge by the key stored in its metadata, and nothing is charged twice.
+FakeStripe stands in for stripe.StripeClient so this runs offline. Its first
+create times out after the PaymentIntent was made, so the record becomes
+unknown. On the retry, stripe_verifier finds the PaymentIntent by the once key
+in its metadata, and nothing is charged twice.
+
+With real Stripe, use client = stripe.StripeClient("sk_...") and nothing else
+changes.
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
-from once import NOT_HAPPENED, Once, make_key
+from once import Once
+from once.verifiers import stripe_params, stripe_verifier
+
+
+class FakePage:
+    def __init__(self, data: list[dict[str, Any]]) -> None:
+        self.data = data
+
+
+class FakePaymentIntents:
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.flaky = True
+
+    def create(self, params: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
+        intent = {"id": f"pi_{len(self.created) + 1}", "status": "succeeded", **params}
+        self.created.append(intent)
+        if self.flaky:
+            self.flaky = False
+            raise TimeoutError("read timed out after the charge went through")
+        return intent
+
+    def search(self, params: dict[str, Any]) -> FakePage:
+        return FakePage([])  # new objects take a while to show up in search
+
+    def list(self, params: dict[str, Any]) -> FakePage:
+        return FakePage(list(reversed(self.created))[: params["limit"]])
 
 
 class FakeStripe:
-    charges: ClassVar[list[dict[str, Any]]] = []
-    flaky: ClassVar[bool] = True
-
-    @classmethod
-    def create_charge(cls, amount: int, customer: str, idempotency_key: str) -> str:
-        charge_id = f"ch_{len(cls.charges) + 1}"
-        cls.charges.append(
-            {"id": charge_id, "amount": amount, "metadata": {"once_key": idempotency_key}}
-        )
-        if cls.flaky:
-            cls.flaky = False
-            raise TimeoutError("read timed out after the charge went through")
-        return charge_id
-
-    @classmethod
-    def search(cls, once_key: str) -> list[dict[str, Any]]:
-        return [c for c in cls.charges if c["metadata"]["once_key"] == once_key]
+    def __init__(self) -> None:
+        self.payment_intents = FakePaymentIntents()
 
 
-def find_charge(key: str, args: dict[str, Any]) -> Any:
-    found = FakeStripe.search(once_key=key)
-    if not found:
-        return NOT_HAPPENED
-    return {"charge_id": found[0]["id"]}
-
-
+client = FakeStripe()
 once = Once("example.db")
 
 
-@once.tool(name="charge_card", verify=find_charge)
-def charge_card(amount: int, customer: str, idempotency_key: str | None = None) -> dict[str, str]:
+@once.tool(name="charge_card", verify=stripe_verifier("payment_intent", client=client))
+def charge_card(amount: int, customer: str, idempotency_key: str | None = None) -> dict[str, Any]:
     """Charge a customer. Agent-facing tool."""
     assert idempotency_key is not None
-    charge_id = FakeStripe.create_charge(amount, customer, idempotency_key=idempotency_key)
-    return {"charge_id": charge_id}
+    params = {"amount": amount, "currency": "usd", "customer": customer, "confirm": True}
+    return client.payment_intents.create(**stripe_params(idempotency_key, params))
 
 
 def main() -> None:
@@ -56,12 +65,9 @@ def main() -> None:
             charge_card(1000, "cus_123")
         except TimeoutError as exc:
             print("first try:", exc)
-        print("retry:", charge_card(1000, "cus_123"))  # verify finds ch_1
-        print("replay:", charge_card(1000, "cus_123"))  # stored result
-
-    key = make_key("charge_card", {"amount": 1000, "customer": "cus_123"}, scope="order_456")
-    print("explicit:", once.execute(fn=charge_card, key=key, amount=1000, customer="cus_123"))
-    print("charges made:", len(FakeStripe.charges))
+        print("retry:", charge_card(1000, "cus_123")["id"])  # verify finds pi_1
+        print("replay:", charge_card(1000, "cus_123")["id"])  # stored result
+    print("charges made:", len(client.payment_intents.created))
 
 
 if __name__ == "__main__":

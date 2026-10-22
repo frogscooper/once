@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev,postgres]" mcp langchain-core langgraph
+      - run: pip install -e ".[dev,postgres,stripe]" mcp langchain-core langgraph
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
@@ -81,8 +81,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]" langchain-core langgraph "${{ matrix.mcp }}"
-      - run: pytest -q tests/test_integrations.py tests/test_integrations_mcp.py tests/test_integrations_langchain.py
+      - run: pip install -e ".[dev,stripe]" langchain-core langgraph "${{ matrix.mcp }}"
+      - run: pytest -q tests/test_integrations.py tests/test_integrations_mcp.py tests/test_integrations_langchain.py tests/test_integrations_stripe.py
+      - run: python examples/stripe_example.py
       - run: python examples/langgraph_example.py
       - run: python examples/mcp_server.py --demo
       - run: pytest -q -m heavy tests/test_stress.py
