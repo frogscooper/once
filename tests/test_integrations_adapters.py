@@ -56,7 +56,7 @@ def test_openai_tool_scopes_by_group(once: Once) -> None:
     calls = 0
 
     @oa_tool(once, name="charge")
-    async def charge(ctx: ToolContext, amount: int, idempotency_key: str | None = None) -> str:
+    async def charge(ctx: ToolContext, amount: int, idempotency_key: str = "") -> str:
         nonlocal calls
         calls += 1
         assert idempotency_key == make_key("charge", {"amount": amount}, group_id(ctx))
@@ -115,7 +115,7 @@ def test_context_scope() -> None:
     assert context_scope(object(), "conversation") is None
 
 
-def test_pydantic_tool_enclosing_scope_by_default(once: Once) -> None:
+def test_pydantic_tool_default_scope_order(once: Once) -> None:
     calls = 0
 
     @pa_tool(once, name="send")
@@ -125,12 +125,19 @@ def test_pydantic_tool_enclosing_scope_by_default(once: Once) -> None:
         return calls
 
     assert list(inspect.signature(send).parameters) == ["ctx", "to"]
-    # a fresh conversation id per run does not change the key
+    # conversation id by default
     assert send(RunContext("c1"), "a") == 1
-    assert send(RunContext("c2"), "a") == 1
+    assert send(RunContext("c1"), "a") == 1
+    assert send(RunContext("c2"), "a") == 2
+    assert once.get(make_key("send", {"to": "a"}, "c2")) is not None
+    # the enclosing scope comes before the conversation id
     with once.scope("job_1"):
-        assert send(RunContext("c3"), "a") == 2
-        assert send(RunContext("c4"), "a") == 2
+        assert send(RunContext("c3"), "a") == 3
+        assert send(RunContext("c4"), "a") == 3
+    assert once.get(make_key("send", {"to": "a"}, "job_1")) is not None
+    # no conversation id and no enclosing scope: unscoped key
+    assert send(RunContext(), "a") == 4
+    assert once.get(make_key("send", {"to": "a"}, None)) is not None
 
 
 def test_pydantic_tool_opt_in_scopes(once: Once) -> None:
@@ -173,6 +180,11 @@ def test_pydantic_tool_scope_from(once: Once) -> None:
     assert once.get(make_key("ping", {"n": 1}, "u1")) is not None
     assert ping(RunContext(run="r1"), 1) == "1"  # scope_from gave None: run id
     assert once.get(make_key("ping", {"n": 1}, "r1")) is not None
+    with once.scope("job_1"):
+        assert ping(ctx, 2) == "2"  # scope_from beats the enclosing scope
+        assert ping(RunContext(run="r1"), 3) == "3"  # enclosing beats the run id
+    assert once.get(make_key("ping", {"n": 2}, "u1")) is not None
+    assert once.get(make_key("ping", {"n": 3}, "job_1")) is not None
 
 
 def test_pydantic_tool_without_context_and_bad_scope(once: Once) -> None:

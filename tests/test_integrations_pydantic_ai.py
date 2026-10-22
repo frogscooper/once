@@ -26,26 +26,24 @@ def test_agent_scopes(tmp_path: Path) -> None:
     once = Once(tmp_path / "once.db")
     charges: list[str | None] = []
 
-    async def charge(ctx: RunContext[None], amount: int, idempotency_key: str | None = None) -> str:
+    async def charge(ctx: RunContext[None], amount: int, idempotency_key: str = "") -> str:
         """Charge a card."""
         charges.append(idempotency_key)
         return f"ch_{len(charges)}"
 
-    default: Agent[None, str] = Agent(FunctionModel(model), tools=[once_tool(once, charge)])
-    default.run_sync("go")
-    default.run_sync("go")  # new conversation id, same enclosing scope: no new charge
-    assert len(charges) == 1
-    with once.scope("job_1"):
-        default.run_sync("go")
+    agent: Agent[None, str] = Agent(FunctionModel(model), tools=[once_tool(once, charge)])
+    agent.run_sync("go", conversation_id="conv_1")
+    agent.run_sync("go", conversation_id="conv_1")
+    agent.run_sync("go", conversation_id="conv_2")
     assert len(charges) == 2
-
-    by_conv: Agent[None, str] = Agent(FunctionModel(model))
-    by_conv.tool(once_tool(once, scope="conversation")(charge))
-    by_conv.run_sync("go", conversation_id="conv_1")
-    by_conv.run_sync("go", conversation_id="conv_1")
-    by_conv.run_sync("go", conversation_id="conv_2")
-    assert len(charges) == 4
-    assert len(set(charges)) == 4
+    with once.scope("job_1"):  # the enclosing scope comes before the conversation id
+        agent.run_sync("go", conversation_id="conv_3")
+        agent.run_sync("go", conversation_id="conv_4")
+    assert len(charges) == 3
+    agent.run_sync("go")  # Pydantic AI makes up a conversation id for each run
+    agent.run_sync("go")
+    assert len(charges) == 5
+    assert len(set(charges)) == 5
 
 
 def test_tool_schema_hides_context_and_key(tmp_path: Path) -> None:
@@ -60,7 +58,7 @@ def test_tool_schema_hides_context_and_key(tmp_path: Path) -> None:
 
     @agent.tool
     @once_tool(once)
-    def refund(ctx: RunContext[None], order_id: str, idempotency_key: str | None = None) -> str:
+    def refund(ctx: RunContext[None], order_id: str, idempotency_key: str = "") -> str:
         """Refund an order."""
         return order_id
 

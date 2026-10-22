@@ -25,7 +25,7 @@ def test_runner_dedupes_per_group(tmp_path: Path) -> None:
 
     @function_tool
     @once_tool(once, name="charge")
-    async def charge(ctx: ToolContext[Any], amount: int, idempotency_key: str | None = None) -> str:
+    async def charge(ctx: ToolContext[Any], amount: int, idempotency_key: str = "") -> str:
         """Charge a card."""
         charges.append(ctx.tool_call_id)
         return f"ch_{len(charges)}"

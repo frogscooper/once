@@ -22,7 +22,7 @@ def test_tool_run_and_arun(tmp_path: Path) -> None:
 
     @tool("charge")
     @once_tool(once, name="charge", scope_arg="order_id")
-    def charge(order_id: str, amount: int, idempotency_key: str | None = None) -> str:
+    def charge(order_id: str, amount: int, idempotency_key: str = "") -> str:
         """Charge a card for an order."""
         charges.append(idempotency_key)
         return f"ch_{len(charges)}"
