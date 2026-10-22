@@ -15,11 +15,9 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on what is installed
     raise ImportError("PostgresStore needs psycopg, pip install 'agent-once[postgres]'") from exc
 
-from .store import Record, Status, _cutoff, _next_token, _now
+from .store import _COLUMNS, Record, Status, _cutoff, _next_token, _now, to_record
 
 DEFAULT_TABLE = "once_effects"
-
-_COLUMNS = "key, status, result, error, args_hash, created_at, updated_at"
 
 # Timestamps are stored as text in the same format SQLiteStore uses. The exact
 # string is the owner token, so it must round-trip unchanged.
@@ -31,7 +29,8 @@ CREATE TABLE IF NOT EXISTS {table} (
     error TEXT,
     args_hash TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    expires_at TEXT
 )
 """
 
@@ -41,7 +40,8 @@ class PostgresStore:
 
     dsn: a libpq connection string or postgresql:// URL.
     table: table name, optionally schema qualified ("myschema.effects").
-        Created if missing, unless create is False.
+        Created if missing, unless create is False. A table made before ttl
+        support gets its expires_at column added either way.
 
     One connection per store, in autocommit mode, shared by all threads with a
     lock. Every statement is its own transaction, so no row stays locked
@@ -67,8 +67,7 @@ class PostgresStore:
         self._ident = sql.Identifier(*parts)
         self._conn_obj: psycopg.Connection[Any] | None = None
         self._lock = threading.RLock()
-        if create:
-            self._create()
+        self._setup(create)
 
     def _q(self, query: str) -> sql.Composed:
         return sql.SQL(query).format(table=self._ident)
@@ -86,14 +85,28 @@ class PostgresStore:
         with self._lock:
             return self._conn().execute(self._q(query), params)
 
-    def _create(self) -> None:
+    def _setup(self, create: bool) -> None:
         # Concurrent CREATE TABLE IF NOT EXISTS can fail on a unique index in
         # the catalog, so serialize it with an advisory lock.
         with self._lock:
             conn = self._conn()
             with conn.transaction():
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"once:{self.table}",))
-                conn.execute(self._q(_SCHEMA))
+                if create:
+                    conn.execute(self._q(_SCHEMA))
+                # Tables made before ttl support have no expires_at column. Only
+                # ALTER when it is missing, since that needs table ownership.
+                name = self._ident.as_string(conn)
+                row = conn.execute(
+                    "SELECT to_regclass(%s) IS NOT NULL, EXISTS (SELECT 1 FROM pg_attribute "
+                    "WHERE attrelid = to_regclass(%s) AND attname = 'expires_at' "
+                    "AND NOT attisdropped)",
+                    (name, name),
+                ).fetchone()
+                if row is not None and row[0] and not row[1]:
+                    conn.execute(
+                        self._q("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expires_at TEXT")
+                    )
 
     def table_exists(self) -> bool:
         with self._lock:
@@ -124,7 +137,7 @@ class PostgresStore:
             row = self._execute(
                 f"SELECT {_COLUMNS} FROM {{table}} WHERE key = %s", (key,)
             ).fetchone()
-        return None if row is None else _record(row)
+        return None if row is None else to_record(row)
 
     def finish(
         self,
@@ -133,12 +146,13 @@ class PostgresStore:
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> bool:
         """Move a pending record we own to its final state."""
         cur = self._execute(
-            "UPDATE {table} SET status = %s, result = %s, error = %s, updated_at = %s "
-            "WHERE key = %s AND status = %s AND updated_at = %s",
-            (status.value, result, error, _now(), key, Status.PENDING.value, token),
+            "UPDATE {table} SET status = %s, result = %s, error = %s, updated_at = %s, "
+            "expires_at = %s WHERE key = %s AND status = %s AND updated_at = %s",
+            (status.value, result, error, _now(), expires_at, key, Status.PENDING.value, token),
         )
         return cur.rowcount == 1
 
@@ -148,6 +162,7 @@ class PostgresStore:
         status: Status,
         result: str | None = None,
         error: str | None = None,
+        expires_at: str | None = None,
     ) -> str | None:
         """Change a record only if it is unchanged since it was read.
 
@@ -155,9 +170,40 @@ class PostgresStore:
         """
         now = _next_token(record.updated_at)
         cur = self._execute(
-            "UPDATE {table} SET status = %s, result = %s, error = %s, updated_at = %s "
+            "UPDATE {table} SET status = %s, result = %s, error = %s, updated_at = %s, "
+            "expires_at = %s WHERE key = %s AND status = %s AND updated_at = %s",
+            (
+                status.value,
+                result,
+                error,
+                now,
+                expires_at,
+                record.key,
+                record.status.value,
+                record.updated_at,
+            ),
+        )
+        return now if cur.rowcount == 1 else None
+
+    def renew(self, record: Record, args_hash: str | None) -> str | None:
+        """Turn an expired record back into a fresh pending one, if it is unchanged.
+
+        Returns an owner token, or None if someone else changed it first.
+        """
+        now = _next_token(record.updated_at)
+        cur = self._execute(
+            "UPDATE {table} SET status = %s, result = NULL, error = NULL, args_hash = %s, "
+            "created_at = %s, updated_at = %s, expires_at = NULL "
             "WHERE key = %s AND status = %s AND updated_at = %s",
-            (status.value, result, error, now, record.key, record.status.value, record.updated_at),
+            (
+                Status.PENDING.value,
+                args_hash,
+                now,
+                now,
+                record.key,
+                record.status.value,
+                record.updated_at,
+            ),
         )
         return now if cur.rowcount == 1 else None
 
@@ -176,7 +222,7 @@ class PostgresStore:
             params.append(limit)
         with self._lock:
             rows = self._execute(query, params).fetchall()
-        return [_record(r) for r in rows]
+        return [to_record(r) for r in rows]
 
     def keys_with_prefix(self, prefix: str, limit: int = 2) -> list[str]:
         with self._lock:
@@ -197,10 +243,14 @@ class PostgresStore:
         )
         return cur.rowcount
 
+    def purge_expired(self) -> int:
+        """Delete done records whose ttl has run out."""
+        cur = self._execute(
+            "DELETE FROM {table} WHERE status = %s AND expires_at IS NOT NULL AND expires_at <= %s",
+            (Status.DONE.value, _now()),
+        )
+        return cur.rowcount
+
     def delete(self, key: str) -> bool:
         cur = self._execute("DELETE FROM {table} WHERE key = %s", (key,))
         return cur.rowcount == 1
-
-
-def _record(row: Sequence[Any]) -> Record:
-    return Record(row[0], Status(row[1]), row[2], row[3], row[4], row[5], row[6])
