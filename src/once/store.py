@@ -1,4 +1,4 @@
-"""SQLite storage for effect records."""
+"""Storage for effect records: the Store protocol and the SQLite store."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS effects (
@@ -50,6 +50,83 @@ class Record:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _next_token(previous: str) -> str:
+    """A new updated_at value that is always different from ``previous``."""
+    now = _now()
+    if now <= previous:
+        # Coarse clocks (Windows) can return the same time twice. The new
+        # value has to differ from the old one, since it is the owner token.
+        later = datetime.fromisoformat(previous) + timedelta(microseconds=1)
+        now = later.isoformat(timespec="microseconds")
+    return now
+
+
+def _cutoff(older_than: float) -> str:
+    then = datetime.now(timezone.utc) - timedelta(seconds=older_than)
+    return then.isoformat(timespec="microseconds")
+
+
+class Store(Protocol):
+    """What Once needs from a storage backend.
+
+    Timestamps are ISO 8601 UTC strings with microseconds. A pending record is
+    owned by whoever set its current updated_at value; claim and take return
+    that value as the owner token, and finish only applies while it matches.
+    """
+
+    def claim(self, key: str, args_hash: str | None) -> str | None:
+        """Insert a pending record. Returns an owner token, or None if the key exists."""
+        ...
+
+    def get(self, key: str) -> Record | None: ...
+
+    def finish(
+        self,
+        key: str,
+        token: str,
+        status: Status,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Move a pending record we own to its final state."""
+        ...
+
+    def take(
+        self,
+        record: Record,
+        status: Status,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> str | None:
+        """Change a record only if it is unchanged since it was read."""
+        ...
+
+    def records(
+        self, statuses: Iterable[Status] | None = None, limit: int | None = None
+    ) -> list[Record]: ...
+
+    def keys_with_prefix(self, prefix: str, limit: int = 2) -> list[str]: ...
+
+    def purge(self, older_than: float, statuses: Iterable[Status]) -> int: ...
+
+    def delete(self, key: str) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+def is_postgres_dsn(target: object) -> bool:
+    return isinstance(target, str) and target.startswith(("postgresql://", "postgres://"))
+
+
+def open_store(target: str | Path, busy_timeout: float = 5.0) -> Store:
+    """A PostgresStore for a postgresql:// URL, otherwise a SQLiteStore for a file path."""
+    if is_postgres_dsn(target):
+        from .postgres import PostgresStore
+
+        return PostgresStore(str(target))
+    return SQLiteStore(target, busy_timeout=busy_timeout)
 
 
 class SQLiteStore:
@@ -167,12 +244,7 @@ class SQLiteStore:
 
         Returns the new token, or None if someone else changed it first.
         """
-        now = _now()
-        if now <= record.updated_at:
-            # Coarse clocks (Windows) can return the same time twice. The new
-            # value has to differ from the old one, since it is the owner token.
-            later = datetime.fromisoformat(record.updated_at) + timedelta(microseconds=1)
-            now = later.isoformat(timespec="microseconds")
+        now = _next_token(record.updated_at)
         cur = self._conn().execute(
             "UPDATE effects SET status = ?, result = ?, error = ?, updated_at = ? "
             "WHERE key = ? AND status = ? AND updated_at = ?",
@@ -213,9 +285,7 @@ class SQLiteStore:
         values = [Status(s).value for s in statuses]
         if not values:
             return 0
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than)).isoformat(
-            timespec="microseconds"
-        )
+        cutoff = _cutoff(older_than)
         marks = ",".join("?" * len(values))
         cur = self._conn().execute(
             f"DELETE FROM effects WHERE updated_at < ? AND status IN ({marks})",

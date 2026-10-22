@@ -18,7 +18,7 @@ from typing import Any, ParamSpec, TypeVar, cast, overload
 
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
 from .key import args_hash, canonical_json, make_key
-from .store import Record, SQLiteStore, Status
+from .store import Record, Status, Store, open_store
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -96,9 +96,12 @@ def _call_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
 
 
 class Once:
-    """Runs side-effecting calls at most once per key, backed by SQLite.
+    """Runs side-effecting calls at most once per key.
 
-    path: SQLite file. Defaults to ./once.db.
+    path: SQLite file, or a postgresql:// URL to use PostgresStore. Defaults
+        to ./once.db.
+    store: a store object to use instead of path, such as
+        PostgresStore(dsn, table="..."). Pass path or store, not both.
     wait: seconds to wait for a pending record (owned by another process) to
         finish before raising EffectPending. 0 means raise right away.
     unknown_on: exception types that mean "the effect may have happened". They
@@ -110,15 +113,20 @@ class Once:
 
     def __init__(
         self,
-        path: str | Path = "once.db",
+        path: str | Path | None = None,
         *,
+        store: Store | None = None,
         wait: float = 0.0,
         poll_interval: float = 0.05,
         unknown_on: tuple[type[BaseException], ...] = (TimeoutError,),
         stale_after: float | None = None,
         busy_timeout: float = 5.0,
     ) -> None:
-        self.store = SQLiteStore(path, busy_timeout=busy_timeout)
+        if store is not None and path is not None:
+            raise TypeError("pass path or store, not both")
+        if store is None:
+            store = open_store("once.db" if path is None else path, busy_timeout)
+        self.store: Store = store
         self.wait = wait
         self.poll_interval = poll_interval
         self.unknown_on = unknown_on
@@ -246,7 +254,7 @@ class Once:
         return await self._arun(call, inspect.iscoroutinefunction(func), timeout, verify)
 
     def close(self) -> None:
-        """Close the SQLite connections. The instance reconnects if used again."""
+        """Close the store's connections. The instance reconnects if used again."""
         self.store.close()
 
     def __enter__(self) -> Once:
@@ -492,7 +500,7 @@ class Once:
     #
     # Async callers do not take the threading lock. Coroutines on the same loop
     # are serialized by a per-loop, per-key asyncio.Lock; everything else (other
-    # threads, loops, processes) is coordinated through the SQLite claim, the
+    # threads, loops, processes) is coordinated through the store claim, the
     # same way separate processes are. Store calls run in worker threads.
 
     @asynccontextmanager

@@ -10,7 +10,7 @@ from .exceptions import (
     OnceError,
 )
 from .key import args_hash, canonical_json, make_key
-from .store import Record, SQLiteStore, Status
+from .store import Record, SQLiteStore, Status, Store
 
 __all__ = [
     "NOT_HAPPENED",
@@ -24,6 +24,7 @@ __all__ = [
     "Record",
     "SQLiteStore",
     "Status",
+    "Store",
     "Verifier",
     "args_hash",
     "canonical_json",
