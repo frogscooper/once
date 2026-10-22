@@ -13,12 +13,13 @@ import time
 from collections.abc import AsyncIterator, Callable, Collection, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast, overload
 
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
+from .hooks import Event, Hook, Hooks, Kind, Outcome, acall_hook, call_sync_hook, logger
 from .key import args_hash, canonical_json, make_key
 from .store import Record, Status, Store, expiry, open_store
 
@@ -72,9 +73,38 @@ class _InFlight:
 @dataclass(frozen=True)
 class _Call:
     key: str
+    tool_name: str
     args_hash: str
     args: dict[str, Any]
     invoke: Callable[[], Any]
+
+
+@dataclass
+class _Trace:
+    """What one execute did, for hooks."""
+
+    key: str
+    tool_name: str
+    started_at: float = field(default_factory=time.time)
+    t0: float = field(default_factory=time.monotonic)
+    outcome: Outcome = "ran"
+    status: Status | None = None
+    waited: bool = False
+
+    def event(self, kind: Kind, record: Record | None, error: BaseException | None) -> Event:
+        status = self.status if self.status is not None else Status.PENDING
+        duration = time.monotonic() - self.t0
+        return Event(
+            kind,
+            self.key,
+            self.tool_name,
+            status,
+            self.outcome,
+            self.started_at,
+            duration,
+            record,
+            error,
+        )
 
 
 def _ttl(ttl: TTL | None) -> float | None:
@@ -135,6 +165,7 @@ class Once:
     ttl: default time to live for done records, in seconds or as a timedelta.
         Once it runs out, the next call with the same key runs again. Tools and
         calls can set their own. None (the default) means records never expire.
+    hooks: a Hooks object with callbacks for claims, outcomes and replays.
     """
 
     def __init__(
@@ -148,6 +179,7 @@ class Once:
         stale_after: float | None = None,
         busy_timeout: float = 5.0,
         ttl: TTL | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         if store is not None and path is not None:
             raise TypeError("pass path or store, not both")
@@ -159,6 +191,7 @@ class Once:
         self.unknown_on = unknown_on
         self.stale_after = stale_after
         self.ttl = _ttl(ttl)
+        self.hooks = hooks
         self._locks: dict[str, tuple[threading.Lock, int]] = {}
         self._alocks: dict[tuple[int, str], tuple[asyncio.Lock, int]] = {}
         self._locks_guard = threading.Lock()
@@ -404,7 +437,7 @@ class Once:
         def invoke() -> Any:
             return func(*bound.args, **bound.kwargs)
 
-        return _Call(key, h, call_args, invoke)
+        return _Call(key, tool_name, h, call_args, invoke)
 
     def _verifiable(self, record: Record) -> bool:
         if record.status is Status.UNKNOWN:
@@ -470,6 +503,68 @@ class Once:
         assert record is not None
         return record
 
+    # hooks
+
+    def _hook(self, kind: Kind) -> Hook | None:
+        return None if self.hooks is None else self.hooks.get(kind)
+
+    def _emit(
+        self,
+        kind: Kind,
+        trace: _Trace,
+        record: Record | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        hook = self._hook(kind)
+        if hook is None:
+            return
+        try:
+            if record is None:
+                record = self.store.get(trace.key)
+            event = trace.event(kind, record, error)
+        except Exception:
+            logger.exception("once: could not build the on_%s event for %s", kind, trace.key)
+            return
+        call_sync_hook(hook, event)
+
+    async def _aemit(
+        self,
+        kind: Kind,
+        trace: _Trace,
+        record: Record | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        hook = self._hook(kind)
+        if hook is None:
+            return
+        try:
+            if record is None:
+                record = await asyncio.to_thread(self.store.get, trace.key)
+            event = trace.event(kind, record, error)
+        except Exception:
+            logger.exception("once: could not build the on_%s event for %s", kind, trace.key)
+            return
+        await acall_hook(hook, event)
+
+    def _finished(self, trace: _Trace) -> Kind | None:
+        """The hook for this call's own outcome, if it stored one."""
+        if trace.status is Status.UNKNOWN:
+            trace.outcome = "unknown"
+        if trace.status is None or trace.status is Status.PENDING:
+            return None
+        return cast(Kind, trace.status.value)
+
+    def _settled(self, trace: _Trace, record: Record | None) -> None:
+        """Note how a call that could not run or replay ended."""
+        if record is None or record.status is Status.PENDING:
+            trace.outcome = "pending"
+        elif record.status is Status.UNKNOWN:
+            trace.outcome = "unknown"
+        else:
+            trace.outcome = "replayed"
+        if record is not None:
+            trace.status = record.status
+
     # sync path
 
     @contextmanager
@@ -492,31 +587,38 @@ class Once:
         self, call: _Call, timeout: float | None, verify: Verifier | None, ttl: float | None
     ) -> Any:
         key, h = call.key, call.args_hash
+        trace = _Trace(key, call.tool_name)
         with self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = self._claim(key, h)
                 if token is not None:
-                    return self._run_owned(key, token, call.invoke, timeout, ttl)
+                    return self._run_owned(trace, token, call.invoke, timeout, ttl)
                 if local is not None and not (
                     local.is_async and local.thread == threading.get_ident()
                 ):
                     # Owned by an async call in this process. Waiting is only
                     # safe if that call is not running on our own thread.
                     local.done.wait()
+                    trace.waited = True
                     continue
-                record = self._read_settled(key)
+                record = self._read_settled(trace)
                 if record is None:
                     continue  # deleted between claim and read
                 if record.expired():
                     # As if it had been purged, so the args may differ too.
                     token = self._renew(record, h)
                     if token is not None:
-                        return self._run_owned(key, token, call.invoke, timeout, ttl)
+                        trace.outcome = "expired-rerun"
+                        return self._run_owned(trace, token, call.invoke, timeout, ttl)
                     continue
                 if record.args_hash != h:
+                    trace.outcome = "conflict"
                     raise KeyConflict(key, record.args_hash, h)
                 if record.status is Status.DONE:
+                    trace.outcome = "waited" if trace.waited else "replayed"
+                    trace.status = Status.DONE
+                    self._emit("replay", trace, record)
                     return _loads(record.result)
                 if verify is None or not self._verifiable(record):
                     break
@@ -524,53 +626,69 @@ class Once:
                 if outcome is NOT_HAPPENED:
                     token = self._take_pending(record)
                     if token is not None:
-                        return self._run_owned(key, token, call.invoke, timeout, ttl)
+                        return self._run_owned(trace, token, call.invoke, timeout, ttl)
                     continue
                 payload = _dumps(outcome)
                 done = self.store.take(record, Status.DONE, payload, expires_at=_expiry(ttl))
                 if done is not None:
+                    trace.outcome, trace.status = "verified", Status.DONE
+                    self._emit("done", trace)
                     return _loads(payload)
+            self._settled(trace, record)
             raise _error_for(key, h, record)
 
-    def _read_settled(self, key: str) -> Record | None:
+    def _read_settled(self, trace: _Trace) -> Record | None:
         """Read the record, waiting up to self.wait while it is pending."""
-        record = self.store.get(key)
+        record = self.store.get(trace.key)
         deadline = time.monotonic() + self.wait
         while (
             record is not None and record.status is Status.PENDING and time.monotonic() < deadline
         ):
             time.sleep(self.poll_interval)
-            record = self.store.get(key)
+            trace.waited = True
+            record = self.store.get(trace.key)
         return record
 
     def _run_owned(
         self,
-        key: str,
+        trace: _Trace,
         token: str,
         call: Callable[[], Any],
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        error: BaseException | None = None
         try:
-            return self._run_owned_inner(key, token, call, timeout, ttl)
+            self._emit("claim", trace)
+            return self._run_owned_inner(trace, token, call, timeout, ttl)
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            self._release(key)
+            self._release(trace.key)
+            kind = self._finished(trace)
+            if kind is not None:
+                self._emit(kind, trace, error=error)
 
     def _run_owned_inner(
         self,
-        key: str,
+        trace: _Trace,
         token: str,
         call: Callable[[], Any],
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        key = trace.key
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
         except _TimedOut as exc:
             self.store.finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
+            trace.status = Status.UNKNOWN
             raise EffectUnknown(self._record(key)) from None
         except BaseException as exc:
-            self.store.finish(key, token, self._error_status(exc), error=_describe(exc))
+            status = self._error_status(exc)
+            self.store.finish(key, token, status, error=_describe(exc))
+            trace.status = status
             raise
 
         try:
@@ -579,8 +697,10 @@ class Once:
             self.store.finish(
                 key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
             )
+            trace.status = Status.UNKNOWN
             raise EffectUnknown(self._record(key)) from exc
         self.store.finish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
+        trace.status = Status.DONE
         return _loads(payload)
 
     # async path
@@ -616,30 +736,37 @@ class Once:
         ttl: float | None,
     ) -> Any:
         key, h = call.key, call.args_hash
+        trace = _Trace(key, call.tool_name)
         loop_thread = threading.get_ident()
         async with self._key_alock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = await asyncio.to_thread(self._claim, key, h, loop_thread)
                 if token is not None:
-                    return await self._arun_owned(key, token, call.invoke, is_async, timeout, ttl)
+                    return await self._arun_owned(trace, token, call.invoke, is_async, timeout, ttl)
                 if local is not None:
                     while not local.done.is_set():
                         await asyncio.sleep(self.poll_interval)
+                    trace.waited = True
                     continue
-                record = await self._aread_settled(key)
+                record = await self._aread_settled(trace)
                 if record is None:
                     continue
                 if record.expired():
                     token = await asyncio.to_thread(self._renew, record, h, loop_thread)
                     if token is not None:
+                        trace.outcome = "expired-rerun"
                         return await self._arun_owned(
-                            key, token, call.invoke, is_async, timeout, ttl
+                            trace, token, call.invoke, is_async, timeout, ttl
                         )
                     continue
                 if record.args_hash != h:
+                    trace.outcome = "conflict"
                     raise KeyConflict(key, record.args_hash, h)
                 if record.status is Status.DONE:
+                    trace.outcome = "waited" if trace.waited else "replayed"
+                    trace.status = Status.DONE
+                    await self._aemit("replay", trace, record)
                     return _loads(record.result)
                 if verify is None or not self._verifiable(record):
                     break
@@ -648,7 +775,7 @@ class Once:
                     token = await asyncio.to_thread(self._take_pending, record, loop_thread)
                     if token is not None:
                         return await self._arun_owned(
-                            key, token, call.invoke, is_async, timeout, ttl
+                            trace, token, call.invoke, is_async, timeout, ttl
                         )
                     continue
                 payload = _dumps(outcome)
@@ -656,17 +783,21 @@ class Once:
                     self.store.take, record, Status.DONE, payload, None, _expiry(ttl)
                 )
                 if taken is not None:
+                    trace.outcome, trace.status = "verified", Status.DONE
+                    await self._aemit("done", trace)
                     return _loads(payload)
+            self._settled(trace, record)
             raise _error_for(key, h, record)
 
-    async def _aread_settled(self, key: str) -> Record | None:
-        record = await asyncio.to_thread(self.store.get, key)
+    async def _aread_settled(self, trace: _Trace) -> Record | None:
+        record = await asyncio.to_thread(self.store.get, trace.key)
         deadline = time.monotonic() + self.wait
         while (
             record is not None and record.status is Status.PENDING and time.monotonic() < deadline
         ):
             await asyncio.sleep(self.poll_interval)
-            record = await asyncio.to_thread(self.store.get, key)
+            trace.waited = True
+            record = await asyncio.to_thread(self.store.get, trace.key)
         return record
 
     async def _afinish(
@@ -685,27 +816,36 @@ class Once:
 
     async def _arun_owned(
         self,
-        key: str,
+        trace: _Trace,
         token: str,
         invoke: Callable[[], Any],
         is_async: bool,
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        error: BaseException | None = None
         try:
-            return await self._arun_owned_inner(key, token, invoke, is_async, timeout, ttl)
+            await self._aemit("claim", trace)
+            return await self._arun_owned_inner(trace, token, invoke, is_async, timeout, ttl)
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
-            self._release(key)
+            self._release(trace.key)
+            kind = self._finished(trace)
+            if kind is not None:
+                await self._aemit(kind, trace, error=error)
 
     async def _arun_owned_inner(
         self,
-        key: str,
+        trace: _Trace,
         token: str,
         invoke: Callable[[], Any],
         is_async: bool,
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        key = trace.key
         raised: list[BaseException] = []
 
         async def tracked() -> Any:
@@ -732,8 +872,11 @@ class Once:
                 await self._afinish(
                     key, token, Status.UNKNOWN, error=f"timeout: no response after {timeout}s"
                 )
+                trace.status = Status.UNKNOWN
                 raise EffectUnknown(await asyncio.to_thread(self._record, key)) from None
-            await self._afinish(key, token, self._error_status(exc), error=_describe(exc))
+            status = self._error_status(exc)
+            await self._afinish(key, token, status, error=_describe(exc))
+            trace.status = status
             raise
 
         try:
@@ -742,8 +885,10 @@ class Once:
             await self._afinish(
                 key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
             )
+            trace.status = Status.UNKNOWN
             raise EffectUnknown(await asyncio.to_thread(self._record, key)) from exc
         await self._afinish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
+        trace.status = Status.DONE
         return _loads(payload)
 
 

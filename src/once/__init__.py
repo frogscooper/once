@@ -9,6 +9,7 @@ from .exceptions import (
     KeyConflict,
     OnceError,
 )
+from .hooks import Event, Hooks
 from .key import args_hash, canonical_json, make_key
 from .store import Record, SQLiteStore, Status, Store
 
@@ -18,6 +19,8 @@ __all__ = [
     "EffectFailed",
     "EffectPending",
     "EffectUnknown",
+    "Event",
+    "Hooks",
     "KeyConflict",
     "Once",
     "OnceError",
