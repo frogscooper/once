@@ -191,6 +191,31 @@ def send_email(to: str, subject: str, config: RunnableConfig) -> str: ...
 
 Runnable versions are in `examples/mcp_server.py` and `examples/langgraph_example.py`. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
 
+## Expiry
+
+By default a done result is kept forever. Give it a time to live when the effect should happen again later, like a daily report or a cache refresh:
+
+```python
+from datetime import timedelta
+
+once = Once("once.db", ttl=timedelta(days=30))   # default for every call
+
+@once.tool(ttl=3600)                              # this tool: one hour
+def send_digest(user_id: str) -> str: ...
+
+once.execute(send_digest, user_id="u_1", ttl=60)  # this call: one minute
+```
+
+`ttl` is seconds or a `timedelta`. The call's value beats the tool's, which beats the `Once` default; `math.inf` means never. The clock starts when the call finishes, and the record keeps it in `expires_at`. After that the record counts as gone: the next call with the key runs again (even with different arguments), and if several callers get there at once only one of them runs it. The rest wait for its result like any other pending call.
+
+Only done records expire. Failed and unknown records keep blocking until you `reset` them or `verify` resolves them, since someone has to decide whether the effect happened.
+
+Expired records stay in the table until you delete them with `once gc --expired` or `once.purge(expired=True)`. Run it on a schedule, for example from cron:
+
+```
+0 3 * * * once gc --expired --db /srv/app/once.db
+```
+
 ## CLI
 
 The package installs a `once` command for looking at and cleaning up a database. It reads `--db` or `$ONCE_DB`, defaulting to `./once.db`.
@@ -201,9 +226,10 @@ once show 3f2a                           # one record as JSON; a unique key pref
 once reset 3f2a                          # delete it so the call can run again
 once gc --older-than 7d                  # delete done records older than 7 days
 once gc --older-than 30d --status failed --status done
+once gc --expired                        # delete done records past their ttl
 ```
 
-`gc` only deletes done records unless you pass `--status`. Deleting a pending or unknown record means the call can run again, so do that with `reset` after checking. The same operations are on `Once` as `records(status=..., limit=...)`, `purge(older_than_seconds, status=...)` and `reset(key)`.
+`gc --older-than` only deletes done records unless you pass `--status`. Deleting a pending or unknown record means the call can run again, so do that with `reset` after checking. The same operations are on `Once` as `records(status=..., limit=...)`, `purge(older_than_seconds, status=..., expired=...)` and `reset(key)`.
 
 ## Storage
 
@@ -211,8 +237,11 @@ One table in SQLite, in WAL mode with a busy timeout:
 
 ```sql
 CREATE TABLE effects (key TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT,
-  error TEXT, args_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+  error TEXT, args_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  expires_at TEXT);
 ```
+
+Databases and Postgres tables made before `expires_at` existed get the column added when `Once` opens them; old records never expire. With `PostgresStore(create=False)` the user still needs the right to `ALTER` the table once, or you can add the column yourself.
 
 A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts the row runs the function. This works across threads and processes on one machine. SQLite over a network filesystem is not supported.
 
