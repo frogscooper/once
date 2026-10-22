@@ -1,0 +1,114 @@
+# Concepts
+
+## Statuses
+
+Every call gets a record under its key. The record has one of four statuses:
+
+| status | meaning | a later call with the key |
+|--------|---------|---------------------------|
+| `pending` | claimed and running, or the owner died | raises `EffectPending` |
+| `done` | finished, result stored as JSON | returns the stored result |
+| `failed` | raised a known error | raises `EffectFailed` |
+| `unknown` | timed out, was interrupted, or the result could not be stored | raises `EffectUnknown` |
+
+A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts the row runs the function. Everyone else reads the record.
+
+The first call re-raises the original exception. Later calls raise the `Effect*` error, which has the stored `.record` and `.key`. All of them inherit from `OnceError`, as does `KeyConflict`.
+
+Failed and unknown records are never retried on their own. Once you know what happened, `once.reset(key)` deletes the record so the next call runs again.
+
+Return values go through JSON, so the first call and every replay return the same thing (a tuple comes back as a list). Arguments must be JSON serializable too, or the call raises `TypeError` before anything runs.
+
+## Unknown
+
+`unknown` means the effect may or may not have happened. A record becomes unknown when:
+
+- the function raises one of the `unknown_on` exception types. The default is `(TimeoutError,)`, since a timed out request may have reached the other side. Change it with `Once(unknown_on=(TimeoutError, MyClientError))`.
+- the function raises something that is not an `Exception`, like `KeyboardInterrupt` or `asyncio.CancelledError`.
+- `timeout=` runs out. `execute(..., timeout=5)` and `@once.tool(timeout=5)` stop waiting after 5 seconds. A sync call keeps running in a daemon thread, since Python cannot kill it, and its outcome is discarded. An async call is cancelled with `asyncio.wait_for`.
+- the result is not JSON serializable.
+
+Any other exception marks the record `failed`.
+
+## Pending and wait
+
+A pending record owned by another process raises `EffectPending` right away. `Once(wait=2.0)` waits up to 2 seconds for it to finish first, polling every `poll_interval` seconds (default 0.05).
+
+Calls in the same process wait for each other without that setting: threads with the same key are serialized by a lock, and coroutines on one event loop by an `asyncio.Lock`. A sync and an async caller, or callers on two loops, also wait for whoever started first. One exception: a blocking sync call on an event loop's thread, for a key a coroutine on that same loop is running, raises `EffectPending` instead of deadlocking.
+
+## Verify
+
+An unknown record stays stuck until someone checks the downstream system. If that system can answer the question, give the tool a `verify` callback and `once` asks it on the next call instead of raising `EffectUnknown`:
+
+```python
+from once import NOT_HAPPENED
+
+
+def find_charge(key: str, args: dict) -> object:
+    charges = stripe.Charge.search(query=f"metadata['once_key']:'{key}'")
+    if not charges.data:
+        return NOT_HAPPENED
+    return {"id": charges.data[0].id}
+
+
+@once.tool(name="charge_card", verify=find_charge)
+def charge_card(amount: int, customer: str, idempotency_key: str | None = None) -> dict:
+    charge = stripe.Charge.create(
+        amount=amount,
+        currency="usd",
+        customer=customer,
+        idempotency_key=idempotency_key,
+        metadata={"once_key": idempotency_key},
+    )
+    return {"id": charge.id}
+```
+
+`verify(key, args)` gets the key and the call arguments (without excluded ones). Then:
+
+- it returns a result: the record becomes `done` with that result, and nothing runs.
+- it returns `NOT_HAPPENED`: the record is taken over and the function runs again.
+- it raises: the record stays as it was and the error propagates.
+
+`execute(..., verify=...)` works the same way. For async tools and `aexecute`, `verify` may be async. Failed records are never verified. [Verifiers](verifiers.md) has ready-made callbacks for Stripe and HTTP APIs.
+
+## stale_after
+
+A process that dies mid-call leaves its record `pending` forever. `Once(stale_after=600)` treats a pending record older than 600 seconds as abandoned and hands it to `verify`, if the call has one. Without `verify`, nothing changes: `once` never re-runs a call unless a callback says the effect did not happen.
+
+Pick a value well above the tool's longest run, since a pending record that is merely slow looks the same as a dead one. A record that was taken over can no longer be written by its old owner: each owner holds a token, and the store only accepts the outcome while the token still matches.
+
+With Postgres and workers on several hosts, the record's age comes from each worker's clock, so keep `stale_after` well above any clock drift too.
+
+## Scope
+
+The scope separates one run, order or step from the next. Set it for a block of code:
+
+```python
+with once.scope("order_456"):
+    charge_card(1000, "cus_123")
+```
+
+or per call with `execute(..., scope="order_456")`. Scopes are context variables, so they follow async tasks and nest: the innermost `once.scope()` wins, and `once.current_scope()` returns it (or None). The framework [integrations](integrations/index.md) set the scope from the framework's own run or thread id.
+
+`None` and `""` are different scopes.
+
+## Keys
+
+The key is
+
+```
+sha256(canonical_json([tool_name, args, scope]))
+```
+
+as hex, where `canonical_json` is `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)`. The three parts go in one JSON array, so no choice of name, arguments or scope can collide with another. `once.make_key(tool_name, args, scope=None)` computes it.
+
+Arguments are bound to the function signature with defaults filled in, so `charge_card(1000, "cus_123")` and `charge_card(amount=1000, customer="cus_123")` get the same key. `@once.tool(exclude=("ctx",))` leaves parameters out of the key; they are still passed to the function.
+
+The tool name defaults to the function's `__name__`. Pass `name=` to keep keys stable if you rename the function.
+
+If the function has an `idempotency_key` parameter:
+
+- `once` passes the key in, so you can forward it downstream.
+- If the caller passes a non-empty `idempotency_key`, that value is the key. `""` and `None` mean "compute one".
+
+Each record also stores a hash of the tool name and arguments. Reusing a key with different arguments raises `KeyConflict`, unless the old record has [expired](ttl.md).
