@@ -33,7 +33,7 @@ agent: Agent[None, str] = Agent(FunctionModel(model))
 
 
 @agent.tool
-@once_tool(once, scope="conversation")
+@once_tool(once)
 def send_email(ctx: RunContext[None], to: str) -> str:
     """Send an email."""
     sent.append(to)

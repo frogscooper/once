@@ -11,11 +11,11 @@ first parameter and hides it from the model.
     async def refund(ctx: RunContext[Deps], order_id: str, amount: int) -> str: ...
 
 The RunContext parameter is left out of the key. The scope is, in order: the
-value of ``scope_arg`` if you name one, ``scope_from(ctx)`` if given, then
-``ctx.conversation_id`` or ``ctx.run_id`` if you pass ``scope="conversation"``
-or ``scope="run"``, then the enclosing ``once.scope()``. The conversation and
-run ids are opt-in because Pydantic AI makes up a fresh one for every run that
-doesn't pass its own. ``run_id`` is stable when a durable workflow replays a
+value of ``scope_arg`` if you name one, ``scope_from(ctx)`` if given, the
+enclosing ``once.scope()``, then ``ctx.conversation_id`` (or ``ctx.run_id``
+with ``scope="run"``). Pass your own ``conversation_id`` to ``agent.run``:
+Pydantic AI makes up a fresh one for every run that doesn't, and then each
+run gets its own key. ``run_id`` is stable when a durable workflow replays a
 run. Tool call ids and retry counts are not used.
 """
 
@@ -25,7 +25,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, Literal, ParamSpec, TypeVar, overload
 
-from ..core import TTL, Once, Verifier
+from ..core import TTL, Once, Verifier, current_scope
 from ._wrap import find_param, wrap
 
 P = ParamSpec("P")
@@ -56,7 +56,7 @@ def once_tool(
     verify: Verifier | None = None,
     scope_arg: str | None = None,
     scope_from: ScopeFrom | None = None,
-    scope: RunScope | None = None,
+    scope: RunScope = "conversation",
     context_arg: str | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
@@ -72,7 +72,7 @@ def once_tool(
     verify: Verifier | None = None,
     scope_arg: str | None = None,
     scope_from: ScopeFrom | None = None,
-    scope: RunScope | None = None,
+    scope: RunScope = "conversation",
     context_arg: str | None = None,
 ) -> Any:
     """Decorate a Pydantic AI tool function so each distinct call runs at most once.
@@ -81,13 +81,13 @@ def once_tool(
         key too.
     scope_from: called with the RunContext, returns the scope or None, e.g.
         ``lambda ctx: ctx.deps.user_id``.
-    scope: "conversation" or "run" to scope by ``ctx.conversation_id`` or
-        ``ctx.run_id``.
+    scope: "conversation" (the default) or "run": the RunContext id used when
+        nothing above it gives a scope.
     context_arg: the RunContext parameter, if it is not annotated as
         RunContext or named ``ctx`` or ``context``.
     """
-    if scope not in (None, "conversation", "run"):
-        raise ValueError(f"scope must be 'conversation', 'run' or None, not {scope!r}")
+    if scope not in ("conversation", "run"):
+        raise ValueError(f"scope must be 'conversation' or 'run', not {scope!r}")
 
     def decorate(func: Callable[P, R]) -> Callable[P, R]:
         sig = inspect.signature(func)
@@ -103,7 +103,8 @@ def once_tool(
                 value = scope_from(ctx)
                 if value is not None:
                     return value
-            return context_scope(ctx, scope) if scope else None
+            enclosing = current_scope()
+            return enclosing if enclosing is not None else context_scope(ctx, scope)
 
         exclude = (ctx_name,) if ctx_name else ()
         return wrap(

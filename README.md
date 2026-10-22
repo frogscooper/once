@@ -200,14 +200,14 @@ from once.integrations.openai_agents import once_tool
 async def charge_card(ctx: ToolContext[Deps], customer: str, amount: int) -> str: ...
 ```
 
-Pydantic AI. The scope is `scope_arg`, then `scope_from(ctx)`, then the enclosing `once.scope()`. Pass `scope="conversation"` or `scope="run"` to use `ctx.conversation_id` or `ctx.run_id` instead (Pydantic AI makes up a new conversation id per run unless you pass one):
+Pydantic AI. The scope is `scope_arg`, then `scope_from(ctx)`, then the enclosing `once.scope()`, then `ctx.conversation_id`. Pass `scope="run"` to use `ctx.run_id` there instead. Pydantic AI makes up a new conversation id for each run unless you pass one, so pass `conversation_id=` to `agent.run` or wrap the run in `once.scope()`:
 
 ```python
 from once.integrations.pydantic_ai import once_tool
 
 
 @agent.tool
-@once_tool(once, scope="conversation")
+@once_tool(once)
 def send_email(ctx: RunContext[Deps], to: str) -> str: ...
 ```
 
@@ -252,6 +252,29 @@ Expired records stay in the table until you delete them with `once gc --expired`
 0 3 * * * once gc --expired --db /srv/app/once.db
 ```
 
+## Hooks
+
+Pass `Hooks` to see what happens to each call, for logging, metrics or a demo:
+
+```python
+from once import Event, Hooks, Once
+
+
+def show(event: Event) -> None:
+    print(event.kind, event.tool_name, event.outcome, f"{event.duration:.3f}s")
+
+
+once = Once("once.db", hooks=Hooks(on_claim=show, on_done=show, on_replay=show))
+```
+
+`on_claim` fires when a call claims its key and is about to run. `on_done`, `on_failed` and `on_unknown` fire once the result is stored (`on_done` also when `verify` resolves a record as done). `on_replay` fires when a duplicate gets the stored result instead of running. Each hook gets an `Event` with `key`, `tool_name`, `status`, `outcome`, `started_at`, `duration`, `record`, and `error` for failed and unknown calls.
+
+Hooks run inline, so keep them quick. They can be async when you use `aexecute` or async tools. A hook that raises is logged to the `once` logger and the call carries on.
+
+## OpenTelemetry
+
+`pip install 'agent-once[otel]'` adds `opentelemetry-api`. Each `execute` and `aexecute` then makes a span named `once <tool_name>`, with `once.key`, `once.tool`, `once.status` and `once.outcome` attributes. The outcome is `ran`, `replayed`, `waited`, `expired-rerun`, `verified`, `unknown`, `pending` or `conflict`. Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. `import once` never imports OpenTelemetry.
+
 ## CLI
 
 The package installs a `once` command for looking at and cleaning up a database. It reads `--db` or `$ONCE_DB`, defaulting to `./once.db`.
@@ -277,7 +300,7 @@ CREATE TABLE effects (key TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT,
   expires_at TEXT);
 ```
 
-Databases and Postgres tables made before `expires_at` existed get the column added when `Once` opens them; old records never expire. With `PostgresStore(create=False)` the user still needs the right to `ALTER` the table once, or you can add the column yourself.
+Databases and Postgres tables made before `expires_at` existed get the column and its index added when `Once` opens them; old records never expire. With `PostgresStore(create=False)` the user still needs the right to `ALTER` the table and create the index once, or you can add them yourself.
 
 A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts the row runs the function. This works across threads and processes on one machine. SQLite over a network filesystem is not supported.
 
