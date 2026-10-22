@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from pathlib import Path
 
 import pytest
 
-from once import EffectFailed, KeyConflict, Once, Status, make_key
+from once import EffectFailed, KeyConflict, Once, Status, current_scope, make_key
 
 
 @pytest.fixture
@@ -61,6 +62,32 @@ def test_scope_changes_the_key(once: Once) -> None:
     with once.scope("run_2"):
         assert post("hello") == 2
     assert post("hello") == 3
+
+
+def test_current_scope(once: Once) -> None:
+    assert current_scope() is None
+    with once.scope("run_1"):
+        assert current_scope() == "run_1"
+        with once.scope("step_2"):
+            assert current_scope() == "step_2"
+        with once.scope(None):
+            assert current_scope() is None
+        assert current_scope() == "run_1"
+    assert current_scope() is None
+
+
+def test_current_scope_follows_async_tasks(once: Once) -> None:
+    async def inner() -> str | None:
+        await asyncio.sleep(0)
+        return current_scope()
+
+    async def main() -> list[str | None]:
+        with once.scope("a"):
+            task = asyncio.create_task(inner())
+        with once.scope("b"):
+            return [await task, await inner()]
+
+    assert asyncio.run(main()) == ["a", "b"]
 
 
 def test_idempotency_key_is_passed_through(once: Once) -> None:
