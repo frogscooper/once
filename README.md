@@ -189,7 +189,7 @@ from once.integrations.langchain import once_tool
 def send_email(to: str, subject: str, config: RunnableConfig) -> str: ...
 ```
 
-OpenAI Agents SDK. The scope is `scope_arg`, then `scope_from(ctx)` if given, then `RunConfig.group_id`, so pass your conversation id as `group_id`:
+OpenAI Agents SDK. The scope is `scope_arg`, then `scope_from(ctx)` if given, then `RunConfig.group_id`, then the enclosing `once.scope()`. Pass your conversation id as `group_id`:
 
 ```python
 from once.integrations.openai_agents import once_tool
