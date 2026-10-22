@@ -165,7 +165,7 @@ The rules are the same as for sync calls. Coroutines on one event loop with the 
 
 ## Framework helpers
 
-`once.integrations` has decorators for MCP servers and LangChain/LangGraph tools. They don't import the framework, so there is nothing extra to install. Put them under the framework's own decorator. They leave the framework's context or config parameter out of the key, set the scope from it, and hide `idempotency_key` from the tool schema so the model never sees it.
+`once.integrations` has decorators for MCP servers, LangChain/LangGraph, the OpenAI Agents SDK, Pydantic AI and CrewAI. They don't import the framework, so there is nothing extra to install. Put them under the framework's own decorator. They leave the framework's context or config parameter out of the key, set the scope from it, and hide `idempotency_key` from the tool schema so the model never sees it.
 
 MCP (`FastMCP` in mcp 1.x, `MCPServer` in 2.x). The scope is `scope_arg` if you name one, otherwise the MCP session id. Request ids are not used, since a retried call gets a new one.
 
@@ -189,7 +189,41 @@ from once.integrations.langchain import once_tool
 def send_email(to: str, subject: str, config: RunnableConfig) -> str: ...
 ```
 
-Runnable versions are in `examples/mcp_server.py` and `examples/langgraph_example.py`. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
+OpenAI Agents SDK. The scope is `scope_arg`, then `scope_from(ctx)` if given, then `RunConfig.group_id`, so pass your conversation id as `group_id`:
+
+```python
+from once.integrations.openai_agents import once_tool
+
+
+@function_tool
+@once_tool(once, name="charge_card")
+async def charge_card(ctx: ToolContext[Deps], customer: str, amount: int) -> str: ...
+```
+
+Pydantic AI. The scope is `scope_arg`, then `scope_from(ctx)`, then the enclosing `once.scope()`. Pass `scope="conversation"` or `scope="run"` to use `ctx.conversation_id` or `ctx.run_id` instead (Pydantic AI makes up a new conversation id per run unless you pass one):
+
+```python
+from once.integrations.pydantic_ai import once_tool
+
+
+@agent.tool
+@once_tool(once, scope="conversation")
+def send_email(ctx: RunContext[Deps], to: str) -> str: ...
+```
+
+CrewAI. Tools get no run context, so the scope is `scope_arg` or the enclosing `once.scope()`. Wrapping `crew.kickoff()` in `with once.scope(run_id):` works, since CrewAI copies context variables into its worker threads:
+
+```python
+from once.integrations.crewai import once_tool
+
+
+@tool("refund_order")
+@once_tool(once, name="refund_order", scope_arg="order_id")
+def refund_order(order_id: str, amount: int) -> str:
+    """Refund an order."""
+```
+
+Runnable versions are in `examples/`, and none of them need an API key. The `openai-agents`, `pydantic-ai` and `crewai` extras install the framework. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
 
 ## CLI
 

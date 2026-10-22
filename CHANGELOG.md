@@ -12,6 +12,7 @@ First release.
 - `Once.close()`, and `Once` works as a context manager.
 - `exclude=` on `once.tool` to leave parameters out of the key.
 - `once.integrations.mcp` and `once.integrations.langchain` decorators, with examples.
+- `once.integrations.openai_agents`, `once.integrations.pydantic_ai` and `once.integrations.crewai` decorators, with examples and extras.
 - `PostgresStore` for workers on several machines, behind the `postgres` extra. Use `Once("postgresql://...")` or `Once(store=PostgresStore(dsn, table=...))`. The CLI accepts a Postgres URL for `--db` and has a `--table` option.
 - `Store` protocol, so `Once(store=...)` takes any backend that implements it.
 - `once.verifiers`: `stripe_verifier` and `stripe_params` for Stripe charges, PaymentIntents and refunds (`stripe` extra, or pass a client), and `http_verifier` for any API that can look an effect up by key.
