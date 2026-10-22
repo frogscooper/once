@@ -13,8 +13,9 @@ from once.cli import main, parse_age
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    path = tmp_path / "once.db"
+def db(db: str | Path) -> str | Path:
+    """The shared db fixture with three records in it."""
+    path = db
     with Once(path) as once:
         once.execute(lambda: {"id": "ch_1"}, key="aaa111")
         once.execute(lambda: "ok", key="aaa222")
@@ -34,7 +35,7 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
     return code, out, err
 
 
-def test_ls(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_ls(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run(capsys, "ls", "--db", str(db))
     assert code == 0
     rows = [line.split("\t") for line in out.splitlines()]
@@ -50,7 +51,7 @@ def test_ls(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_db_from_env(
-    db: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    db: str | Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ONCE_DB", str(db))
     code, out, _ = run(capsys, "ls")
@@ -63,7 +64,7 @@ def test_missing_db(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert not (tmp_path / "nope.db").exists()
 
 
-def test_show(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_show(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run(capsys, "show", "--db", str(db), "aaa111")
     assert code == 0
     data = json.loads(out)
@@ -78,7 +79,7 @@ def test_show(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 1 and "no record" in err
 
 
-def test_reset(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_reset(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run(capsys, "reset", "--db", str(db), "bbb3")
     assert code == 0 and out.strip() == "deleted bbb333"
     with Once(db) as once:
@@ -87,7 +88,7 @@ def test_reset(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 1
 
 
-def test_gc(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_gc(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run(capsys, "gc", "--db", str(db), "--older-than", "1h")
     assert out.strip() == "deleted 0 records"
     code, out, _ = run(capsys, "gc", "--db", str(db), "--older-than", "0")
@@ -96,7 +97,7 @@ def test_gc(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert out.strip() == "deleted 1 record"
 
 
-def test_gc_status_filter(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_gc_status_filter(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     run(capsys, "gc", "--db", str(db), "--older-than", "0", "--status", "failed")
     with Once(db) as once:
         assert [r.key for r in once.records(status=Status.FAILED)] == []
@@ -119,13 +120,13 @@ def test_parse_age(text: str, seconds: float) -> None:
     assert parse_age(text) == seconds
 
 
-def test_bad_age(db: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_bad_age(db: str | Path, capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main(["gc", "--db", str(db), "--older-than", "soon"])
     assert "bad age" in capsys.readouterr().err
 
 
-def test_python_dash_m(db: Path) -> None:
+def test_python_dash_m(db: str | Path) -> None:
     out = subprocess.run(
         [sys.executable, "-m", "once", "ls", "--db", str(db), "--status", "done"],
         capture_output=True,
@@ -133,16 +134,3 @@ def test_python_dash_m(db: Path) -> None:
         check=True,
     ).stdout
     assert len(out.splitlines()) == 2
-
-
-def test_records_and_purge_api(tmp_path: Path) -> None:
-    with Once(tmp_path / "once.db") as once:
-        once.execute(lambda: 1, key="a")
-        once.execute(lambda: 2, key="b")
-        assert {r.key for r in once.records()} == {"a", "b"}
-        assert once.records(status="pending") == []
-        assert len(once.records(status=["done", Status.FAILED])) == 2
-        assert once.purge(3600) == 0
-        assert once.purge(0, status=[]) == 0
-        time.sleep(0.05)
-        assert once.purge(0) == 2

@@ -15,8 +15,8 @@ from once.store import Record, SQLiteStore
 
 
 @pytest.fixture
-def once(tmp_path: Path) -> Once:
-    return Once(tmp_path / "once.db")
+def once(db: str | Path) -> Once:
+    return Once(db)
 
 
 def charge(amount: int) -> str:
@@ -62,8 +62,12 @@ def test_record_deleted_between_claim_and_read(once: Once, monkeypatch: pytest.M
     monkeypatch.setattr(once.store, "get", fail_once(once.store.get, None))
     assert once.execute(charge, key="k", tool_name="charge", amount=1) == "ch_1"
 
-    monkeypatch.setattr(once.store, "claim", fail_once(SQLiteStore.claim.__get__(once.store), None))
-    monkeypatch.setattr(once.store, "get", fail_once(SQLiteStore.get.__get__(once.store), None))
+    monkeypatch.setattr(
+        once.store, "claim", fail_once(type(once.store).claim.__get__(once.store), None)
+    )
+    monkeypatch.setattr(
+        once.store, "get", fail_once(type(once.store).get.__get__(once.store), None)
+    )
     assert asyncio.run(once.aexecute(acharge, key="k2", tool_name="charge", amount=1)) == "ch_1"
 
 
@@ -89,7 +93,9 @@ def test_lost_takeover_race_reads_again(
 
     expected = "ch_1" if verdict is NOT_HAPPENED else "ch_found"
     assert once.execute(charge, key="k", tool_name="charge", amount=1, verify=verify) == expected
-    monkeypatch.setattr(once.store, "take", fail_once(SQLiteStore.take.__get__(once.store), None))
+    monkeypatch.setattr(
+        once.store, "take", fail_once(type(once.store).take.__get__(once.store), None)
+    )
     result = asyncio.run(
         once.aexecute(acharge, key="k2", tool_name="charge", amount=1, verify=verify)
     )
