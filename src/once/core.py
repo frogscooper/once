@@ -39,6 +39,11 @@ TTL = float | timedelta
 _current_scope: ContextVar[str | None] = ContextVar("once_scope", default=None)
 
 
+def current_scope() -> str | None:
+    """The scope set by the innermost ``once.scope(...)`` block, or None."""
+    return _current_scope.get()
+
+
 class _NotHappened(enum.Enum):
     NOT_HAPPENED = "not_happened"
 
