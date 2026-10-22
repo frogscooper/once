@@ -2,7 +2,7 @@
 
 `once` makes side-effecting tool calls (charge a card, send an email, create a ticket) safe for an AI agent to retry. Each distinct call runs at most once; a replay gets the stored result instead of running the side effect again.
 
-Agents retry after timeouts, crash and resume, or re-plan and call the same tool twice. `once` records every call in SQLite under an idempotency key so the duplicates do nothing.
+Agents retry after timeouts, crash and resume, or re-plan and call the same tool twice. `once` records every call in SQLite (or Postgres) under an idempotency key so the duplicates do nothing.
 
 ## Install
 
@@ -10,7 +10,7 @@ Agents retry after timeouts, crash and resume, or re-plan and call the same tool
 pip install agent-once
 ```
 
-The import name is `once`. Python 3.10+, no dependencies.
+The import name is `once`. Python 3.10+, no dependencies. For the Postgres store, `pip install 'agent-once[postgres]'` (adds psycopg 3).
 
 ## Quickstart
 
@@ -179,6 +179,24 @@ CREATE TABLE effects (key TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT,
 ```
 
 A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts the row runs the function. This works across threads and processes on one machine. SQLite over a network filesystem is not supported.
+
+## Postgres
+
+For workers on more than one machine, point them all at the same Postgres database:
+
+```python
+from once import Once
+from once.postgres import PostgresStore
+
+once = Once("postgresql://user:pass@db/app")  # table once_effects, created if missing
+
+# or pick the table yourself
+once = Once(store=PostgresStore("postgresql://user:pass@db/app", table="agent.effects"))
+```
+
+Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `aexecute`, `reset`, `records` and `purge`. The claim is the same `INSERT ... ON CONFLICT DO NOTHING`, and finishing or taking over a record is an `UPDATE` that only matches if the row is unchanged, so the database decides who runs the call, not anything in your process. Each `Once` holds one connection in autocommit mode and reopens it if it drops. The CLI takes a URL too: `once ls --db postgresql://... [--table agent.effects]`.
+
+Timestamps come from each worker's clock, so `stale_after` assumes the machines' clocks are roughly in sync. Keep it well above both your longest tool call and any clock drift.
 
 ## Limitations
 
