@@ -103,6 +103,42 @@ def charge_card(amount: int, customer: str, idempotency_key: str | None = None) 
 
 Verify is also used for pending records older than `Once(stale_after=...)` seconds, which covers a process that died mid-call. Pick a value well above the tool's longest run, since a pending record that is merely slow looks the same. A record that was taken over can no longer be written by its old owner. Failed records are never verified, and nothing is re-run without a verify callback saying so.
 
+## Ready-made verifiers
+
+`once.verifiers` has verify callbacks for common cases. They need nothing beyond the standard library unless noted.
+
+**Stripe.** `stripe_params` tags the create params with the once key in metadata and sends the key as Stripe's `Idempotency-Key`. `stripe_verifier` finds the object by that metadata later:
+
+```python
+import stripe
+from once.verifiers import stripe_params, stripe_verifier
+
+client = stripe.StripeClient("sk_...")
+
+
+@once.tool(name="charge_card", verify=stripe_verifier("payment_intent", client=client))
+def charge_card(amount: int, customer: str, idempotency_key: str | None = None) -> dict:
+    params = {"amount": amount, "currency": "usd", "customer": customer, "confirm": True}
+    return client.v1.payment_intents.create(**stripe_params(idempotency_key, params)).to_dict()
+```
+
+The kind is `"payment_intent"`, `"charge"` or `"refund"`. Charges and PaymentIntents are looked up with the search API. Search can take a minute to see new objects, so when it finds nothing the newest `scan` objects (default 100) from the list API are checked too. Refunds have no search, so only the list is used. A `"charge"` lookup only finds charges you tagged yourself; charges made by a PaymentIntent don't copy its metadata, so look up the PaymentIntent instead. `list_params=lambda args: {"customer": args["customer"]}` narrows the list. The verifier returns the object as a plain dict, or `result(obj)` if you pass `result=`, so match it to what the tool returns. Leave `client` out to build a `StripeClient` from `api_key=` or `stripe.api_key`; that needs `pip install 'agent-once[stripe]'`.
+
+Use both helpers together. If a lookup misses, the call runs again with the same `Idempotency-Key`, and Stripe replays the first response instead of charging twice. Stripe keeps idempotency keys for 24 hours.
+
+**HTTP.** `http_verifier` asks your own API. `{key}` in the URL is the once key and `{name}` is the tool argument of that name, both URL-encoded:
+
+```python
+from once.verifiers import http_verifier
+
+verify = http_verifier(
+    "https://api.example.com/emails/{key}",
+    headers={"Authorization": f"Bearer {token}"},
+)
+```
+
+A 2xx returns the parsed JSON body (or the text, or None when empty). A 404 returns `NOT_HAPPENED`. Anything else raises, so the record stays unknown. Change the mapping with `happened=` and `not_happened=`. `result=` can turn the body into the tool's return value, or into `NOT_HAPPENED` for APIs that answer 200 with something like `{"found": false}`.
+
 ## Async
 
 `@once.tool` works on `async def` functions and gives you an async wrapper. For explicit calls use `await once.aexecute(...)`, which takes the same arguments as `execute`.

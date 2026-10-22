@@ -14,6 +14,7 @@ First release.
 - `once.integrations.mcp` and `once.integrations.langchain` decorators, with examples.
 - `PostgresStore` for workers on several machines, behind the `postgres` extra. Use `Once("postgresql://...")` or `Once(store=PostgresStore(dsn, table=...))`. The CLI accepts a Postgres URL for `--db` and has a `--table` option.
 - `Store` protocol, so `Once(store=...)` takes any backend that implements it.
+- `once.verifiers`: `stripe_verifier` and `stripe_params` for Stripe charges, PaymentIntents and refunds (`stripe` extra, or pass a client), and `http_verifier` for any API that can look an effect up by key.
 
 Changes made before the release that break keys from earlier development builds:
 
