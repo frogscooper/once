@@ -288,3 +288,62 @@ def test_default_client_is_made_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [c.api_key for c in made] == ["sk_global"]
     assert stripe_verifier("charge", api_key="sk_mine")("k", {}) is NOT_HAPPENED
     assert made[-1].api_key == "sk_mine"
+
+
+class FakeStripeError(Exception):
+    def __init__(self, message: str, http_status: int) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
+def test_search_unavailable_falls_back_to_the_list(
+    db: str | Path, client: FakeStripeClient
+) -> None:
+    once = Once(db)
+    pis = client.v1.payment_intents
+    pis.search_error = FakeStripeError(
+        "Request req_1: The search feature is temporarily unavailable in your region.", 400
+    )
+    verify = stripe_verifier("payment_intent", client=client)
+    tool = charge_tool(client)
+    pis.fail_next_create = True
+    with pytest.raises(TimeoutError):
+        once.execute(tool, key="k1", tool_name="charge", verify=verify, amount=1, customer="c")
+    result = once.execute(tool, key="k1", tool_name="charge", verify=verify, amount=1, customer="c")
+    assert result["id"] == "pi_1" and len(pis.objects) == 1
+    assert verify("k1", {})["id"] == "pi_1"
+    assert [c[0] for c in pis.calls].count("search") == 1
+    once.close()
+
+
+@pytest.mark.parametrize(
+    ("message", "status", "falls_back"),
+    [
+        ("Search is not available to merchants in India", 400, True),
+        ("search feature unavailable for merchant", 404, True),
+        ("The provided key does not have the required permissions", 403, True),
+        ("Invalid query: unknown field", 400, False),
+        ("Search is unavailable right now", 503, False),
+        ("Too many requests", 429, False),
+    ],
+)
+def test_only_unavailable_search_falls_back(
+    client: FakeStripeClient, message: str, status: int, falls_back: bool
+) -> None:
+    client.v1.charges.objects.append({"id": "ch_1", "metadata": {"once_key": "k"}})
+    client.v1.charges.search_error = FakeStripeError(message, status)
+    verify = stripe_verifier("charge", client=client)
+    if falls_back:
+        assert verify("k", {})["id"] == "ch_1"
+    else:
+        with pytest.raises(FakeStripeError):
+            verify("k", {})
+
+
+def test_unavailable_search_raises_without_a_scan(client: FakeStripeClient) -> None:
+    client.v1.charges.search_error = FakeStripeError("search is not available", 400)
+    with pytest.raises(FakeStripeError):
+        stripe_verifier("charge", client=client, scan=0)("k", {})
+    client.v1.charges.search_error = ConnectionError("down")
+    with pytest.raises(ConnectionError):
+        stripe_verifier("charge", client=client)("k", {})

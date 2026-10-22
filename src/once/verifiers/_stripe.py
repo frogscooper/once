@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal
 
@@ -15,6 +16,14 @@ METADATA_KEY = "once_key"
 
 # Stripe search covers these. Refunds have no search endpoint.
 _SEARCHABLE = {"charge", "payment_intent"}
+
+# How Stripe says search can't be used here, for example for accounts in India
+# ("The search feature is temporarily unavailable in your region.").
+_UNAVAILABLE = re.compile(
+    r"search.{0,40}(unavailable|not available|not enabled|not supported)"
+    r"|(unavailable|not available|not enabled|not supported).{0,40}search",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def stripe_params(
@@ -58,8 +67,12 @@ def stripe_verifier(
     so only the list is used. ``list_params`` maps the tool args to list filters
     such as ``{"customer": args["customer"]}``, to narrow the scan.
 
+    If search isn't available to the account (Stripe doesn't offer it in some
+    regions, or a restricted key can't use it), the list is used instead and
+    search is skipped from then on. With ``scan=0`` that error is raised.
+
     Returns the object as a plain dict (or ``result(obj)`` if given), or
-    NOT_HAPPENED. Stripe errors propagate, which leaves the record unknown.
+    NOT_HAPPENED. Other Stripe errors propagate, which leaves the record unknown.
     """
     if kind not in ("charge", "payment_intent", "refund"):
         raise ValueError(f"unsupported kind {kind!r}")
@@ -67,6 +80,7 @@ def stripe_verifier(
         raise ValueError("scan must be >= 0")
 
     made: list[Any] = []
+    searchable = [kind in _SEARCHABLE]
 
     def verify(key: str, args: dict[str, Any]) -> Any:
         if client is not None:
@@ -76,8 +90,13 @@ def stripe_verifier(
                 made.append(_default_client(api_key))
             service = _service(made[0], kind)
         found = None
-        if kind in _SEARCHABLE:
-            found = _first(_search(service, metadata_key, key), metadata_key, key)
+        if searchable[0]:
+            try:
+                found = _first(_search(service, metadata_key, key), metadata_key, key)
+            except Exception as exc:
+                if not scan or not _search_unavailable(exc):
+                    raise
+                searchable[0] = False
         if found is None and scan:
             params = {**dict(list_params(args) if list_params else {}), "limit": min(scan, 100)}
             found = _first(_take(service.list(params=params), scan), metadata_key, key)
@@ -87,6 +106,19 @@ def stripe_verifier(
         return result(obj) if result is not None else obj
 
     return verify
+
+
+def _search_unavailable(exc: BaseException) -> bool:
+    """True if a Stripe error means search can't be used by this account.
+
+    That is a permission error (HTTP 403), or a 400 or 404 whose message says
+    search is unavailable. Rate limits, outages, bad keys and bad queries are
+    not, and still raise.
+    """
+    status = getattr(exc, "http_status", None)
+    if status == 403:
+        return True
+    return status in (400, 404) and _UNAVAILABLE.search(str(exc)) is not None
 
 
 def _default_client(api_key: str | None) -> Any:
