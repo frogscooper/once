@@ -205,8 +205,9 @@ class Once:
         Works on plain and async functions; an async function gets an async
         wrapper. The key is make_key(name, args, scope), where scope comes from
         ``with once.scope(...)``. If the function has an ``idempotency_key``
-        parameter, the computed key is passed in. If the caller passes
-        ``idempotency_key`` explicitly, that value is used as the key.
+        parameter, the computed key is passed in. If the caller passes a
+        non-empty ``idempotency_key``, that value is used as the key; "" and
+        None mean "compute one".
 
         ``exclude`` names parameters to leave out of the key, such as a
         framework context object. They are still passed to the function.
@@ -382,6 +383,8 @@ class Once:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         explicit = bound.arguments.pop(KEY_PARAM, None)
+        if explicit == "":  # often a default; same as None, so compute the key
+            explicit = None
         call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
         try:
             canonical_json(call_args)

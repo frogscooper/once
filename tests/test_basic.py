@@ -138,6 +138,37 @@ def test_explicit_idempotency_key_argument_is_the_key(once: Once) -> None:
     assert once.get("k1") is not None
 
 
+@pytest.mark.parametrize("empty", ["", None])
+def test_empty_idempotency_key_means_compute_one(once: Once, empty: str | None) -> None:
+    # Regression: a default of "" was used as the key, so two tools with
+    # that default collided with KeyConflict.
+    seen: list[str] = []
+
+    @once.tool
+    def send_email(to: str, idempotency_key: str = "") -> str:
+        seen.append(idempotency_key)
+        return f"email to {to}"
+
+    @once.tool
+    def send_sms(to: str, idempotency_key: str = "") -> str:
+        seen.append(idempotency_key)
+        return f"sms to {to}"
+
+    assert send_email("a") == "email to a"
+    assert send_sms("a") == "sms to a"
+    assert send_email("b", idempotency_key=empty) == "email to b"  # type: ignore[arg-type]
+    assert once.execute(send_sms, to="b", idempotency_key=empty) == "sms to b"
+    assert seen == [
+        make_key("send_email", {"to": "a"}),
+        make_key("send_sms", {"to": "a"}),
+        make_key("send_email", {"to": "b"}),
+        make_key("send_sms", {"to": "b"}),
+    ]
+    assert once.get("") is None
+    assert send_email("a", idempotency_key=empty) == "email to a"  # type: ignore[arg-type]
+    assert len(seen) == 4
+
+
 def test_key_reuse_with_different_args_raises(once: Once) -> None:
     def charge(amount: int) -> int:
         return amount
