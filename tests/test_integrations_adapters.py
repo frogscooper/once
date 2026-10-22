@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
+from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +14,7 @@ from typing import Any
 import pytest
 
 from once import Once, make_key
+from once.integrations import langchain, mcp
 from once.integrations.crewai import once_tool as crew_tool
 from once.integrations.openai_agents import group_id
 from once.integrations.openai_agents import once_tool as oa_tool
@@ -210,3 +214,50 @@ def test_crewai_method_leaves_self_out(once: Once) -> None:
 
     assert ChargeTool()._run(5) == 1
     assert ChargeTool()._run(5) == 1  # another instance, same key
+
+
+ADAPTERS: dict[str, Callable[..., Any]] = {
+    "mcp": mcp.once_tool,
+    "langchain": langchain.once_tool,
+    "openai_agents": oa_tool,
+    "pydantic_ai": pa_tool,
+    "crewai": crew_tool,
+}
+
+
+def test_ttl_reaches_the_record_and_expires(once: Once) -> None:
+    calls: dict[str, int] = dict.fromkeys(ADAPTERS, 0)
+    tools: dict[str, Callable[..., int]] = {}
+    for label, adapter in ADAPTERS.items():
+
+        def run(n: int, label: str = label) -> int:
+            calls[label] += 1
+            return calls[label]
+
+        tools[label] = adapter(once, name=label, ttl=0.25)(run)
+
+    for label, tool in tools.items():
+        assert tool(1) == 1
+        assert tool(1) == 1
+        record = once.get(make_key(label, {"n": 1, "label": label}, None))
+        assert record is not None and record.expires_at is not None
+    time.sleep(0.4)
+    for tool in tools.values():
+        assert tool(1) == 2  # expired, so it runs again
+
+
+def test_ttl_timedelta_and_no_ttl(once: Once) -> None:
+    @oa_tool(once, ttl=timedelta(hours=1))
+    def kept(n: int) -> int:
+        return n
+
+    @pa_tool(once)
+    def forever(n: int) -> int:
+        return n
+
+    kept(1)
+    forever(1)
+    kept_record = once.get(make_key("kept", {"n": 1}, None))
+    forever_record = once.get(make_key("forever", {"n": 1}, None))
+    assert kept_record is not None and kept_record.expires_at is not None
+    assert forever_record is not None and forever_record.expires_at is None
