@@ -275,6 +275,56 @@ Hooks run inline, so keep them quick. They can be async when you use `aexecute` 
 
 `pip install 'agent-once[otel]'` adds `opentelemetry-api`. Each `execute` and `aexecute` then makes a span named `once <tool_name>`, with `once.key`, `once.tool`, `once.status` and `once.outcome` attributes. The outcome is `ran`, `replayed`, `waited`, `expired-rerun`, `verified`, `unknown`, `pending` or `conflict`. Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. `import once` never imports OpenTelemetry.
 
+## Expiry
+
+By default a done result is kept forever. Give it a time to live when the effect should happen again later, like a daily report or a cache refresh:
+
+```python
+from datetime import timedelta
+
+once = Once("once.db", ttl=timedelta(days=30))  # default for every call
+
+
+@once.tool(ttl=3600)  # this tool: one hour
+def send_digest(user_id: str) -> str: ...
+
+
+once.execute(send_digest, user_id="u_1", ttl=60)  # this call: one minute
+```
+
+`ttl` is seconds or a `timedelta`. The call's value beats the tool's, which beats the `Once` default; `math.inf` means never. The clock starts when the call finishes, and the record keeps it in `expires_at`. After that the record counts as gone: the next call with the key runs again (even with different arguments), and if several callers get there at once only one of them runs it. The rest wait for its result like any other pending call.
+
+Only done records expire. Failed and unknown records keep blocking until you `reset` them or `verify` resolves them, since someone has to decide whether the effect happened.
+
+Expired records stay in the table until you delete them with `once gc --expired` or `once.purge(expired=True)`. Run it on a schedule, for example from cron:
+
+```
+0 3 * * * once gc --expired --db /srv/app/once.db
+```
+
+## Hooks
+
+Pass `Hooks` to see what happens to each call, for logging, metrics or a demo:
+
+```python
+from once import Event, Hooks, Once
+
+
+def show(event: Event) -> None:
+    print(event.kind, event.tool_name, event.outcome, f"{event.duration:.3f}s")
+
+
+once = Once("once.db", hooks=Hooks(on_claim=show, on_done=show, on_replay=show))
+```
+
+`on_claim` fires when a call claims its key and is about to run. `on_done`, `on_failed` and `on_unknown` fire once the result is stored (`on_done` also when `verify` resolves a record as done). `on_replay` fires when a duplicate gets the stored result instead of running. Each hook gets an `Event` with `key`, `tool_name`, `status`, `outcome`, `started_at`, `duration`, `record`, and `error` for failed and unknown calls.
+
+Hooks run inline, so keep them quick. They can be async when you use `aexecute` or async tools. A hook that raises is logged to the `once` logger and the call carries on.
+
+## OpenTelemetry
+
+`pip install 'agent-once[otel]'` adds `opentelemetry-api`. Each `execute` and `aexecute` then makes a span named `once <tool_name>`, with `once.key`, `once.tool`, `once.status` and `once.outcome` attributes. The outcome is `ran`, `replayed`, `waited`, `expired-rerun`, `verified`, `unknown`, `pending` or `conflict`. Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. `import once` never imports OpenTelemetry.
+
 ## CLI
 
 The package installs a `once` command for looking at and cleaning up a database. It reads `--db` or `$ONCE_DB`, defaulting to `./once.db`.
