@@ -18,6 +18,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast, overload
 
+from ._otel import aspan, span
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
 from .hooks import Event, Hook, Hooks, Kind, Outcome, acall_hook, call_sync_hook, logger
 from .key import args_hash, canonical_json, make_key
@@ -81,13 +82,13 @@ class _Call:
 
 @dataclass
 class _Trace:
-    """What one execute did, for hooks."""
+    """What one execute did, for hooks and spans."""
 
     key: str
     tool_name: str
     started_at: float = field(default_factory=time.time)
     t0: float = field(default_factory=time.monotonic)
-    outcome: Outcome = "ran"
+    outcome: Outcome | None = None
     status: Status | None = None
     waited: bool = False
 
@@ -99,7 +100,7 @@ class _Trace:
             self.key,
             self.tool_name,
             status,
-            self.outcome,
+            self.outcome or "ran",
             self.started_at,
             duration,
             record,
@@ -588,7 +589,7 @@ class Once:
     ) -> Any:
         key, h = call.key, call.args_hash
         trace = _Trace(key, call.tool_name)
-        with self._key_lock(key):
+        with span(trace), self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = self._claim(key, h)
@@ -657,6 +658,7 @@ class Once:
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        trace.outcome = trace.outcome or "ran"
         error: BaseException | None = None
         try:
             self._emit("claim", trace)
@@ -738,7 +740,7 @@ class Once:
         key, h = call.key, call.args_hash
         trace = _Trace(key, call.tool_name)
         loop_thread = threading.get_ident()
-        async with self._key_alock(key):
+        async with aspan(trace), self._key_alock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = await asyncio.to_thread(self._claim, key, h, loop_thread)
@@ -823,6 +825,7 @@ class Once:
         timeout: float | None,
         ttl: float | None,
     ) -> Any:
+        trace.outcome = trace.outcome or "ran"
         error: BaseException | None = None
         try:
             await self._aemit("claim", trace)

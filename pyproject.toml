@@ -24,8 +24,9 @@ dependencies = []
 once = "once.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "hypothesis", "ruff", "mypy"]
+dev = ["pytest", "pytest-cov", "hypothesis", "ruff", "mypy", "opentelemetry-sdk"]
 postgres = ["psycopg[binary]>=3.1"]
+otel = ["opentelemetry-api>=1.20"]
 stripe = ["stripe>=8"]
 mcp = ["mcp"]
 langchain = ["langchain-core", "langgraph"]
