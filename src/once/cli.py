@@ -54,12 +54,13 @@ def _parser() -> argparse.ArgumentParser:
     reset.add_argument("key", help="key or a unique prefix of it")
 
     gc = sub.add_parser("gc", parents=[common], help="delete old records")
-    gc.add_argument("--older-than", type=parse_age, required=True, metavar="AGE")
+    gc.add_argument("--older-than", type=parse_age, metavar="AGE")
+    gc.add_argument("--expired", action="store_true", help="delete done records past their ttl")
     gc.add_argument(
         "--status",
         action="append",
         choices=[*_STATUSES, "all"],
-        help="statuses to delete, repeatable (default: done)",
+        help="statuses to delete with --older-than, repeatable (default: done)",
     )
     return parser
 
@@ -99,12 +100,16 @@ def _show(record: Record) -> str:
         "args_hash": record.args_hash,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "expires_at": record.expires_at,
     }
     return json.dumps(data, indent=2)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "gc" and args.older_than is None and not args.expired:
+        parser.error("gc needs --older-than, --expired, or both")
     try:
         store = _open(args.db, args.table)
     except _UsageError as exc:
@@ -124,9 +129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             store.delete(key)
             print(f"deleted {key}")
         else:
-            chosen = args.status or ["done"]
-            statuses = list(Status) if "all" in chosen else [Status(s) for s in chosen]
-            count = store.purge(args.older_than, statuses)
+            count = store.purge_expired() if args.expired else 0
+            if args.older_than is not None:
+                chosen = args.status or ["done"]
+                statuses = list(Status) if "all" in chosen else [Status(s) for s in chosen]
+                count += store.purge(args.older_than, statuses)
             print(f"deleted {count} record{'' if count == 1 else 's'}")
     except _UsageError as exc:
         print(f"once: {exc}", file=sys.stderr)
