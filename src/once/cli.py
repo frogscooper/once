@@ -1,4 +1,4 @@
-"""Command line tool for inspecting and cleaning up a once database."""
+"""Command line tool for inspecting and cleaning up a once database (SQLite or Postgres)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .store import Record, SQLiteStore, Status
+from .store import Record, SQLiteStore, Status, Store, is_postgres_dsn
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _STATUSES = [s.value for s in Status]
@@ -33,7 +33,12 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--db",
         default=os.environ.get("ONCE_DB", "once.db"),
-        help="SQLite file (default: $ONCE_DB or ./once.db)",
+        help="SQLite file or postgresql:// URL (default: $ONCE_DB or ./once.db)",
+    )
+    common.add_argument(
+        "--table",
+        default=os.environ.get("ONCE_TABLE", "once_effects"),
+        help="Postgres table (default: $ONCE_TABLE or once_effects)",
     )
     parser = argparse.ArgumentParser(prog="once", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -59,13 +64,21 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _open(path: str) -> SQLiteStore:
+def _open(path: str, table: str) -> Store:
+    if is_postgres_dsn(path):
+        from .postgres import PostgresStore
+
+        pg = PostgresStore(path, table=table, create=False)
+        if not pg.table_exists():
+            pg.close()
+            raise _UsageError(f"no table {table} in that database")
+        return pg
     if not Path(path).is_file():
         raise _UsageError(f"no database at {path}")
     return SQLiteStore(path)
 
 
-def _resolve(store: SQLiteStore, key: str) -> str:
+def _resolve(store: Store, key: str) -> str:
     if store.get(key) is not None:
         return key
     matches = store.keys_with_prefix(key)
@@ -93,7 +106,7 @@ def _show(record: Record) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        store = _open(args.db)
+        store = _open(args.db, args.table)
     except _UsageError as exc:
         print(f"once: {exc}", file=sys.stderr)
         return 1
