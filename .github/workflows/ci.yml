@@ -87,3 +87,33 @@ jobs:
       - run: python examples/langgraph_example.py
       - run: python examples/mcp_server.py --demo
       - run: pytest -q -m heavy tests/test_stress.py
+
+  # One environment per framework, since their pins conflict (crewai wants openai<3).
+  adapters:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: openai_agents
+            extra: openai-agents
+          - framework: pydantic_ai
+            extra: pydantic-ai
+          - framework: crewai
+            extra: crewai
+    env:
+      CREWAI_DISABLE_TELEMETRY: "true"
+      OTEL_SDK_DISABLED: "true"
+      PYDANTIC_AI_NO_BANNER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,${{ matrix.extra }}]"
+      - run: python examples/${{ matrix.framework }}_example.py
+      - run: pytest -q tests/test_integrations_${{ matrix.framework }}.py tests/test_integrations_adapters.py
+      - run: >-
+          mypy --python-version 3.12 src/once/integrations/${{ matrix.framework }}.py
+          tests/test_integrations_${{ matrix.framework }}.py examples/${{ matrix.framework }}_example.py
