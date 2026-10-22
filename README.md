@@ -198,10 +198,12 @@ By default a done result is kept forever. Give it a time to live when the effect
 ```python
 from datetime import timedelta
 
-once = Once("once.db", ttl=timedelta(days=30))   # default for every call
+once = Once("once.db", ttl=timedelta(days=30))  # default for every call
 
-@once.tool(ttl=3600)                              # this tool: one hour
+
+@once.tool(ttl=3600)  # this tool: one hour
 def send_digest(user_id: str) -> str: ...
+
 
 once.execute(send_digest, user_id="u_1", ttl=60)  # this call: one minute
 ```
