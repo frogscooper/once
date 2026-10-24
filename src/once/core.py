@@ -773,7 +773,7 @@ class Once:
         async with aspan(trace), self._key_alock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
-                token, local = await asyncio.to_thread(self._claim, key, h, loop_thread)
+                token, local = await self._astep(key, self._claim, key, h, loop_thread)
                 if token is not None:
                     return await self._arun_owned(trace, token, call.invoke, is_async, timeout, ttl)
                 if local is not None:
@@ -785,7 +785,7 @@ class Once:
                 if record is None:
                     continue
                 if record.expired():
-                    token = await asyncio.to_thread(self._renew, record, h, loop_thread)
+                    token = await self._astep(key, self._renew, record, h, loop_thread)
                     if token is not None:
                         trace.outcome = "expired-rerun"
                         return await self._arun_owned(
@@ -804,7 +804,7 @@ class Once:
                     break
                 outcome = await _acall_verify(verify, key, dict(call.args))
                 if outcome is NOT_HAPPENED:
-                    token = await asyncio.to_thread(self._take_pending, record, loop_thread)
+                    token = await self._astep(key, self._take_pending, record, loop_thread)
                     if token is not None:
                         return await self._arun_owned(
                             trace, token, call.invoke, is_async, timeout, ttl
@@ -820,6 +820,40 @@ class Once:
                     return _loads(payload)
             self._settled(trace, record)
             raise _error_for(key, h, record)
+
+    async def _astep(self, key: str, step: Callable[..., R], *args: Any) -> R:
+        """Run a claiming store step in a worker thread.
+
+        The thread cannot be stopped, so if we get cancelled it may still claim
+        the key. In that case the claim is given back once the step finishes,
+        even if the event loop is gone by then.
+        """
+        lock = threading.Lock()
+        state: dict[str, Any] = {}
+
+        def run() -> R:
+            result = step(*args)
+            with lock:
+                state["result"] = result
+                abandoned = "abandoned" in state
+            if abandoned:
+                self._abandon(key, result)
+            return result
+
+        try:
+            return await asyncio.shield(asyncio.to_thread(run))
+        except asyncio.CancelledError:
+            with lock:
+                state["abandoned"] = True
+                finished = "result" in state
+            if finished:
+                self._abandon(key, state["result"])
+            raise
+
+    def _abandon(self, key: str, result: Any) -> None:
+        token = result[0] if isinstance(result, tuple) else result
+        if token is not None:
+            threading.Thread(target=self._give_back, args=(key, token), daemon=True).start()
 
     async def _aread_settled(self, trace: _Trace) -> Record | None:
         record = await asyncio.to_thread(self.store.get, trace.key)

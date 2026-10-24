@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -92,4 +93,47 @@ def test_cancel_in_async_claim_hook_gives_the_claim_back(db: str | Path) -> None
     assert calls == []
     assert once.get("k") is None
     assert once._inflight == {}
+    once.close()
+
+
+def test_cancel_during_async_claim_does_not_leak(db: str | Path) -> None:
+    once = Once(db)
+    gate = threading.Event()
+    real_claim = once.store.claim
+
+    claimed = threading.Event()
+
+    def slow_claim(key: str, h: str | None) -> str | None:
+        gate.wait(5)
+        token = real_claim(key, h)
+        claimed.set()
+        return token
+
+    once.store.claim = slow_claim  # type: ignore[method-assign,assignment]
+    calls: list[int] = []
+
+    async def charge() -> int:
+        calls.append(1)
+        return 1
+
+    async def main_() -> None:
+        task = asyncio.create_task(once.aexecute(charge, key="k"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert claimed.wait(5)
+        for _ in range(100):
+            if not once._inflight and once.get("k") is None:
+                break
+            await asyncio.sleep(0.02)
+
+    asyncio.run(main_())
+    assert calls == []
+    assert once._inflight == {}
+    assert once.get("k") is None
+    once.store.claim = real_claim  # type: ignore[method-assign]
+    # a sync caller is not stuck waiting on a call that never ran
+    assert once.execute(lambda: 2, key="k") == 2
     once.close()
