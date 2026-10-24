@@ -4,7 +4,7 @@ No API key needed: a scripted model asks for the same tool call every run, the
 way a real model does when a turn is retried. The conversation id goes in
 ``RunConfig.group_id``.
 
-    pip install agent-once openai-agents
+    pip install git+https://github.com/frogscooper/once openai-agents
     python examples/openai_agents_example.py
 """
 

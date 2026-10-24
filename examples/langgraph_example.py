@@ -3,7 +3,7 @@
 No LLM needed: a fake agent node always asks for the same tool call, the way a
 model does when a step is replayed after a crash or a retry.
 
-    pip install agent-once langgraph
+    pip install git+https://github.com/frogscooper/once langgraph
     python examples/langgraph_example.py
 """
 
