@@ -23,7 +23,7 @@ with once.scope("order_456"):
 ## Install
 
 ```
-pip install agent-once
+pip install git+https://github.com/frogscooper/once
 ```
 
 The import name is `once`. It needs Python 3.10 or newer and has no dependencies. Extras add optional pieces:

@@ -9,14 +9,37 @@ Docs: https://frogscooper.dev/once/
 ## Install
 
 ```
-pip install agent-once
+pip install git+https://github.com/frogscooper/once
 ```
 
-The import name is `once`. Python 3.10+, no dependencies. For the Postgres store, `pip install 'agent-once[postgres]'` (adds psycopg 3).
+The import name is `once`. Python 3.10+, no dependencies. For the Postgres store, `pip install 'agent-once[postgres] @ git+https://github.com/frogscooper/once'` (adds psycopg 3).
 
 ## Quickstart
 
 ```python
+from once import Once
+
+once = Once("demo.db")
+
+
+@once.tool
+def send_email(to: str) -> str:
+    print("sending to", to)
+    return "sent"
+
+
+with once.scope("run_1"):
+    send_email("a@example.com")  # prints "sending to a@example.com"
+    send_email("a@example.com")  # returns "sent" without sending again
+```
+
+Run it a second time and nothing is sent: the result is stored in `demo.db`.
+
+A tool with a real side effect looks the same. This one needs `pip install stripe` and a test key in `stripe.api_key`:
+
+```python
+import stripe
+
 from once import Once, make_key
 
 once = Once()  # SQLite in ./once.db, or Once(path="...")
@@ -124,7 +147,7 @@ def charge_card(amount: int, customer: str, idempotency_key: str | None = None) 
     return client.v1.payment_intents.create(**stripe_params(idempotency_key, params)).to_dict()
 ```
 
-The kind is `"payment_intent"`, `"charge"` or `"refund"`. Charges and PaymentIntents are looked up with the search API. Search can take a minute to see new objects, so when it finds nothing the newest `scan` objects (default 100) from the list API are checked too. Refunds have no search, so only the list is used. If search isn't available to the account (Stripe doesn't offer it in India, or a restricted key can't use it), the list is used instead. A `"charge"` lookup only finds charges you tagged yourself; charges made by a PaymentIntent don't copy its metadata, so look up the PaymentIntent instead. `list_params=lambda args: {"customer": args["customer"]}` narrows the list. The verifier returns the object as a plain dict, or `result(obj)` if you pass `result=`, so match it to what the tool returns. Leave `client` out to build a `StripeClient` from `api_key=` or `stripe.api_key`; that needs `pip install 'agent-once[stripe]'`. A failed or canceled object counts as not happened. A status still in flux, like `processing` or `requires_action`, or a list too long to scan to the end, raises `StripeInconclusive` and the record stays unknown.
+The kind is `"payment_intent"`, `"charge"` or `"refund"`. Charges and PaymentIntents are looked up with the search API. Search can take a minute to see new objects, so when it finds nothing the newest `scan` objects (default 100) from the list API are checked too. Refunds have no search, so only the list is used. If search isn't available to the account (Stripe doesn't offer it in India, or a restricted key can't use it), the list is used instead. A `"charge"` lookup only finds charges you tagged yourself; charges made by a PaymentIntent don't copy its metadata, so look up the PaymentIntent instead. `list_params=lambda args: {"customer": args["customer"]}` narrows the list. The verifier returns the object as a plain dict, or `result(obj)` if you pass `result=`, so match it to what the tool returns. Leave `client` out to build a `StripeClient` from `api_key=` or `stripe.api_key`; that needs the `stripe` package (`pip install stripe`). A failed or canceled object counts as not happened. A status still in flux, like `processing` or `requires_action`, or a list too long to scan to the end, raises `StripeInconclusive` and the record stays unknown.
 
 Use both helpers together. If a lookup misses, the call runs again with the same `Idempotency-Key`, and Stripe replays the first response instead of charging twice. Stripe keeps idempotency keys for 24 hours.
 
@@ -275,7 +298,7 @@ Hooks run inline, so keep them quick. They can be async when you use `aexecute` 
 
 ## OpenTelemetry
 
-`pip install 'agent-once[otel]'` adds `opentelemetry-api`. Each `execute` and `aexecute` then makes a span named `once <tool_name>`, with `once.key`, `once.tool`, `once.status` and `once.outcome` attributes. The outcome is `ran`, `replayed`, `waited`, `expired-rerun`, `verified`, `unknown`, `pending` or `conflict`. Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. `import once` never imports OpenTelemetry.
+With `opentelemetry-api` installed (`pip install opentelemetry-api`), each `execute` and `aexecute` then makes a span named `once <tool_name>`, with `once.key`, `once.tool`, `once.status` and `once.outcome` attributes. The outcome is `ran`, `replayed`, `waited`, `expired-rerun`, `verified`, `unknown`, `pending` or `conflict`. Exceptions are recorded on the span. Spans go wherever your `TracerProvider` sends them; with none configured they cost nothing. `import once` never imports OpenTelemetry.
 
 ## CLI
 

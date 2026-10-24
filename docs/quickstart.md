@@ -3,6 +3,8 @@
 ## Decorate a tool
 
 ```python
+import stripe
+
 from once import Once
 
 once = Once()  # SQLite in ./once.db, or Once("path/to/once.db")

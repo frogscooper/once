@@ -27,7 +27,7 @@ Each thread gets its own connection in autocommit mode, so every statement is it
 For workers on more than one machine, point them all at one Postgres database:
 
 ```
-pip install 'agent-once[postgres]'
+pip install 'agent-once[postgres] @ git+https://github.com/frogscooper/once'
 ```
 
 This adds psycopg 3.
