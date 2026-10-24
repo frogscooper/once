@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import enum
 import functools
 import inspect
@@ -129,13 +130,15 @@ def _call_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
     """Run fn in a daemon thread and stop waiting after ``timeout`` seconds.
 
     Python cannot kill the thread, so on timeout the call keeps running in the
-    background and its outcome is discarded.
+    background and its outcome is discarded. fn runs in a copy of the
+    caller's context, so once.scope and tracing still apply inside it.
     """
     box: dict[str, Any] = {}
+    ctx = contextvars.copy_context()
 
     def target() -> None:
         try:
-            box["result"] = fn()
+            box["result"] = ctx.run(fn)
         except BaseException as exc:
             box["error"] = exc
 
