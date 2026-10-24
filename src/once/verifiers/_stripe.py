@@ -18,6 +18,15 @@ METADATA_KEY = "once_key"
 # Stripe search covers these. Refunds have no search endpoint.
 _SEARCHABLE = {"charge", "payment_intent"}
 
+# What each status means for the effect. True: it happened (or money is held
+# or moving and a rerun would double it). False: it did not, so a rerun is
+# safe. Statuses that are left out are still in flux, or new to us, and raise.
+_STATUSES: dict[str, dict[str, bool]] = {
+    "charge": {"succeeded": True, "failed": False},
+    "payment_intent": {"succeeded": True, "requires_capture": True, "canceled": False},
+    "refund": {"succeeded": True, "pending": True, "failed": False, "canceled": False},
+}
+
 # How Stripe says search can't be used here, for example for accounts in India
 # ("The search feature is temporarily unavailable in your region.").
 _UNAVAILABLE = re.compile(
@@ -32,6 +41,8 @@ class StripeInconclusive(OnceError):
 
     Raised when the list scan ran out before it saw every object, so a miss
     proves nothing. Narrow the scan with ``list_params`` or raise ``scan``.
+    Also raised when the object is found but its status is still in flux,
+    like a PaymentIntent that is ``processing`` or ``requires_action``.
     """
 
 
@@ -80,6 +91,14 @@ def stripe_verifier(
     regions, or a restricted key can't use it), the list is used instead and
     search is skipped from then on. With ``scan=0`` that error is raised.
 
+    The found object's status decides the outcome. Charges: ``succeeded`` is
+    returned, ``failed`` is NOT_HAPPENED. PaymentIntents: ``succeeded`` and
+    ``requires_capture`` are returned, ``canceled`` is NOT_HAPPENED. Refunds:
+    ``succeeded`` and ``pending`` are returned, ``failed`` and ``canceled`` are
+    NOT_HAPPENED. Any other status (``processing``, ``requires_action``,
+    ``requires_payment_method``, ...) raises StripeInconclusive, so the record
+    stays unknown until it settles.
+
     Returns the object as a plain dict (or ``result(obj)`` if given), or
     NOT_HAPPENED. NOT_HAPPENED needs a list that was read to the end: if more
     than ``scan`` objects match the filters and none of the first ``scan`` is
@@ -120,6 +139,15 @@ def stripe_verifier(
                     " narrow list_params or raise scan"
                 )
         if found is None:
+            return NOT_HAPPENED
+        status = _get(found, "status")
+        happened = _STATUSES[kind].get(status) if isinstance(status, str) else None
+        if happened is None:
+            raise StripeInconclusive(
+                f"{kind} {_get(found, 'id')} tagged {key!r} has status {status!r},"
+                " which doesn't say yet whether it happened"
+            )
+        if not happened:
             return NOT_HAPPENED
         obj = _to_dict(found)
         return result(obj) if result is not None else obj

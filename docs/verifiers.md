@@ -54,6 +54,15 @@ stripe_verifier(
 - If search isn't available to the account (Stripe doesn't offer it in some regions, or a restricted key can't use it), the list is used instead and search is skipped from then on. With `scan=0` that error is raised.
 - `list_params` maps the tool arguments to list filters, like `lambda args: {"customer": args["customer"]}`, to narrow the scan.
 - It returns the object as a plain dict, or `result(obj)` if you pass `result=`, so match it to what the tool returns. If nothing matches it returns `NOT_HAPPENED`. Other Stripe errors propagate, which leaves the record unknown.
+- The status of the object it finds decides the outcome:
+
+    | kind | returned (happened) | `NOT_HAPPENED` |
+    | --- | --- | --- |
+    | `charge` | `succeeded` | `failed` |
+    | `payment_intent` | `succeeded`, `requires_capture` | `canceled` |
+    | `refund` | `succeeded`, `pending` | `failed`, `canceled` |
+
+    Any other status, such as `processing`, `requires_action` or `requires_payment_method`, raises `StripeInconclusive`, so the record stays unknown until it settles and you retry or `reset` it.
 - It only returns `NOT_HAPPENED` after reading the list to the end. If more than `scan` objects match the filters and the one it wants isn't among the newest `scan`, it raises `StripeInconclusive` and the record stays unknown. Narrow `list_params` or raise `scan`. With `scan=0` a search miss alone returns `NOT_HAPPENED`, so only use it with `stripe_params`.
 - `client` is a `stripe.StripeClient`, or anything shaped like one. Leave it out to build a `StripeClient` on first use from `api_key=` or `stripe.api_key`; that needs `pip install 'agent-once[stripe]'`.
 

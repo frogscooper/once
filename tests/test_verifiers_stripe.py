@@ -40,7 +40,7 @@ class Service:
         idem = (options or {}).get("idempotency_key")
         if idem in self.by_idempotency_key:
             return self.by_idempotency_key[idem]
-        obj = {"id": f"{self.prefix}_{len(self.objects) + 1}", **params}
+        obj = {"id": f"{self.prefix}_{len(self.objects) + 1}", "status": "succeeded", **params}
         self.objects.append(obj)
         if idem is not None:
             self.by_idempotency_key[idem] = obj
@@ -250,6 +250,7 @@ def test_clients_without_v1_and_object_shaped_results() -> None:
         def __init__(self, id: str, key: str) -> None:
             self.id = id
             self.metadata = types.SimpleNamespace(once_key=key)
+            self.status = "succeeded"
 
         def to_dict(self) -> dict[str, Any]:
             return {"id": self.id, "amount": 3}
@@ -278,7 +279,12 @@ def test_result_is_json_safe(client: FakeStripeClient) -> None:
 
     charges = client.v1.charges
     charges.objects.append(
-        {"id": "ch_1", "metadata": {"once_key": "k"}, "at": datetime.date(2026, 1, 2)}
+        {
+            "id": "ch_1",
+            "status": "succeeded",
+            "metadata": {"once_key": "k"},
+            "at": datetime.date(2026, 1, 2),
+        }
     )
     assert stripe_verifier("charge", client=client)("k", {})["at"] == "2026-01-02"
 
@@ -369,7 +375,9 @@ def test_search_unavailable_falls_back_to_the_list(
 def test_only_unavailable_search_falls_back(
     client: FakeStripeClient, message: str, status: int, falls_back: bool
 ) -> None:
-    client.v1.charges.objects.append({"id": "ch_1", "metadata": {"once_key": "k"}})
+    client.v1.charges.objects.append(
+        {"id": "ch_1", "status": "succeeded", "metadata": {"once_key": "k"}}
+    )
     client.v1.charges.search_error = FakeStripeError(message, status)
     verify = stripe_verifier("charge", client=client)
     if falls_back:
@@ -386,3 +394,57 @@ def test_unavailable_search_raises_without_a_scan(client: FakeStripeClient) -> N
     client.v1.charges.search_error = ConnectionError("down")
     with pytest.raises(ConnectionError):
         stripe_verifier("charge", client=client)("k", {})
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "outcome"),
+    [
+        ("charge", "succeeded", "found"),
+        ("charge", "failed", "not_happened"),
+        ("charge", "pending", "raise"),
+        ("payment_intent", "succeeded", "found"),
+        ("payment_intent", "requires_capture", "found"),
+        ("payment_intent", "canceled", "not_happened"),
+        ("payment_intent", "processing", "raise"),
+        ("payment_intent", "requires_action", "raise"),
+        ("payment_intent", "requires_confirmation", "raise"),
+        ("payment_intent", "requires_payment_method", "raise"),
+        ("refund", "succeeded", "found"),
+        ("refund", "pending", "found"),
+        ("refund", "failed", "not_happened"),
+        ("refund", "canceled", "not_happened"),
+        ("refund", "requires_action", "raise"),
+        ("charge", None, "raise"),
+        ("payment_intent", "something_new", "raise"),
+    ],
+)
+def test_status_decides_what_a_found_object_means(
+    client: FakeStripeClient, kind: str, status: str | None, outcome: str
+) -> None:
+    service = getattr(client.v1, kind + "s")
+    obj: dict[str, Any] = {"id": "x_1", "metadata": {"once_key": "k"}}
+    if status is not None:
+        obj["status"] = status
+    service.objects.append(obj)
+    service.index_all()
+    verify = stripe_verifier(kind, client=client)  # type: ignore[arg-type]
+    if outcome == "found":
+        assert verify("k", {})["id"] == "x_1"
+    elif outcome == "not_happened":
+        assert verify("k", {}) is NOT_HAPPENED
+    else:
+        with pytest.raises(StripeInconclusive, match="status"):
+            verify("k", {})
+
+
+def test_a_failed_charge_is_not_recorded_as_done(client: FakeStripeClient, tmp_path: Path) -> None:
+    once = Once(tmp_path / "once.db")
+    pis = client.v1.payment_intents
+    pis.objects.append({"id": "pi_1", "status": "canceled", "metadata": {"once_key": "k1"}})
+    verify = stripe_verifier("payment_intent", client=client)
+    with pytest.raises(TimeoutError):
+        once.execute(_raise_timeout, key="k1", tool_name="charge", amount=1, customer="c")
+    result = once.execute(
+        charge_tool(client), key="k1", tool_name="charge", verify=verify, amount=1, customer="c"
+    )
+    assert result["id"] == "pi_2" and result["status"] == "succeeded"

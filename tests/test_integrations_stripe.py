@@ -61,6 +61,7 @@ class FakeApi:
                 intent = {
                     "id": f"pi_{len(api.intents) + 1}",
                     "object": "payment_intent",
+                    "status": "succeeded",
                     "amount": int(form["amount"][0]),
                     "metadata": {"once_key": form["metadata[once_key]"][0]},
                 }
@@ -144,7 +145,14 @@ def test_search_unavailable_uses_the_list(
     client = stripe.StripeClient(
         "sk_test_123", base_addresses={"api": api.url}, max_network_retries=0
     )
-    api.intents.append({"id": "pi_1", "object": "payment_intent", "metadata": {"once_key": "k"}})
+    api.intents.append(
+        {
+            "id": "pi_1",
+            "object": "payment_intent",
+            "status": "succeeded",
+            "metadata": {"once_key": "k"},
+        }
+    )
     api.search_error = (status, body)
     verify = stripe_verifier("payment_intent", client=client)
     if not falls_back:
