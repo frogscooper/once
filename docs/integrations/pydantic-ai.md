@@ -1,7 +1,7 @@
 # Pydantic AI
 
 ```
-pip install 'agent-once[pydantic-ai]'
+pip install 'agent-once[pydantic-ai] @ git+https://github.com/frogscooper/once'
 ```
 
 This installs `pydantic-ai-slim>=1.89`. Older releases have no `RunContext.conversation_id`, so calls from different runs with the same arguments would silently share one key.

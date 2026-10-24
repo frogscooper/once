@@ -1,7 +1,7 @@
 # OpenAI Agents SDK
 
 ```
-pip install 'agent-once[openai-agents]'
+pip install 'agent-once[openai-agents] @ git+https://github.com/frogscooper/once'
 ```
 
 This installs `openai-agents>=0.8.4`. Older releases don't give tools `ctx.run_config`, so `RunConfig.group_id` can't be read and calls from different runs with the same arguments would silently share one key.

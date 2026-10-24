@@ -1,7 +1,7 @@
 # CrewAI
 
 ```
-pip install 'agent-once[crewai]'
+pip install 'agent-once[crewai] @ git+https://github.com/frogscooper/once'
 ```
 
 `once.integrations.crewai.once_tool` wraps a CrewAI tool function. Put `@tool` on top, and give the function a docstring, since CrewAI requires one:
