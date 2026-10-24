@@ -277,3 +277,17 @@ def test_a_later_task_started_by_fn_is_not_recursion(tmp_path: Path) -> None:
 
     asyncio.run(main_())
     once.close()
+
+
+def test_exclude_with_an_unknown_name_raises_when_decorating(tmp_path: Path) -> None:
+    once = Once(tmp_path / "once.db")
+
+    def charge(amount: int, ctx: object = None) -> int:
+        return amount
+
+    with pytest.raises(ValueError, match="'cxt'"):
+        once.tool(exclude=["cxt"])(charge)
+    with pytest.raises(ValueError, match="not parameters of charge"):
+        once.tool(exclude="ctx")(charge)  # a str is a collection of letters
+    assert once.tool(exclude=["ctx"])(charge)(1, ctx=object()) == 1
+    once.close()

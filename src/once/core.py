@@ -261,7 +261,8 @@ class Once:
         None mean "compute one".
 
         ``exclude`` names parameters to leave out of the key, such as a
-        framework context object. They are still passed to the function.
+        framework context object. They are still passed to the function. A name
+        that is not a parameter raises ValueError.
 
         ``ttl`` (seconds or a timedelta) makes a done result expire, after which
         the same call runs again. It overrides the Once default.
@@ -271,6 +272,10 @@ class Once:
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
             tool_name = name or func.__name__
+            unknown = skip - set(inspect.signature(func).parameters)
+            if unknown:
+                names = ", ".join(repr(n) for n in sorted(unknown))
+                raise ValueError(f"exclude names {names} are not parameters of {tool_name}")
 
             if inspect.iscoroutinefunction(func):
 
