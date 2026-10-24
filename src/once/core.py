@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar, cast, overload
 
 from ._otel import aspan, span
-from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict
+from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict, OnceError
 from .hooks import Event, Hook, Hooks, Kind, Outcome, acall_hook, call_sync_hook, logger
 from .key import args_hash, canonical_json, make_key
 from .store import Record, Status, Store, expiry, open_store
@@ -45,6 +45,13 @@ _current_scope: ContextVar[str | None] = ContextVar("once_scope", default=None)
 def current_scope() -> str | None:
     """The scope set by the innermost ``once.scope(...)`` block, or None."""
     return _current_scope.get()
+
+
+# The keys this context is running right now, as (Once id, key, finished).
+# A call for one of them from inside its own fn would wait on itself.
+_active: ContextVar[tuple[tuple[int, str, threading.Event], ...]] = ContextVar(
+    "once_active", default=()
+)
 
 
 class _NotHappened(enum.Enum):
@@ -613,6 +620,24 @@ class Once:
         if record is not None:
             trace.status = record.status
 
+    @contextmanager
+    def _no_reentry(self, key: str) -> Iterator[None]:
+        """Raise if this context is already running ``key`` on this instance."""
+        running = _active.get()
+        for owner, active_key, finished in running:
+            if owner == id(self) and active_key == key and not finished.is_set():
+                raise OnceError(
+                    f"{key!r} was called again from inside its own call, which would wait"
+                    " on itself forever; use a different key for the inner call"
+                )
+        finished = threading.Event()
+        reset = _active.set((*running, (id(self), key, finished)))
+        try:
+            yield
+        finally:
+            finished.set()
+            _active.reset(reset)
+
     # sync path
 
     @contextmanager
@@ -636,7 +661,7 @@ class Once:
     ) -> Any:
         key, h = call.key, call.args_hash
         trace = _Trace(key, call.tool_name)
-        with span(trace), self._key_lock(key):
+        with self._no_reentry(key), span(trace), self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
                 token, local = self._claim(key, h)
@@ -788,8 +813,20 @@ class Once:
         verify: Verifier | None,
         ttl: float | None,
     ) -> Any:
+        trace = _Trace(call.key, call.tool_name)
+        with self._no_reentry(call.key):
+            return await self._arun_guarded(call, is_async, timeout, verify, ttl, trace)
+
+    async def _arun_guarded(
+        self,
+        call: _Call,
+        is_async: bool,
+        timeout: float | None,
+        verify: Verifier | None,
+        ttl: float | None,
+        trace: _Trace,
+    ) -> Any:
         key, h = call.key, call.args_hash
-        trace = _Trace(key, call.tool_name)
         loop_thread = threading.get_ident()
         async with aspan(trace), self._key_alock(key):
             record: Record | None = None

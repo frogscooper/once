@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from once import Hooks, Once, Status
+from once import Hooks, Once, OnceError, Status
 from once.cli import main
 
 
@@ -214,4 +214,66 @@ def test_postgres_connection_drop_mid_call_still_records(pg_schema: str) -> None
 
     assert once.execute(charge, key="k") == "charged"
     assert once.get("k").status is Status.DONE  # type: ignore[union-attr]
+    once.close()
+
+
+def test_recursive_sync_call_raises_instead_of_hanging(tmp_path: Path) -> None:
+    once = Once(tmp_path / "once.db")
+    box: dict[str, Any] = {}
+
+    @once.tool
+    def charge(n: int) -> int:
+        return once.execute(charge, key="k", n=n)  # type: ignore[no-any-return]
+
+    def target() -> None:
+        try:
+            once.execute(charge, key="k", n=1)
+        except BaseException as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive(), "deadlocked"
+    assert isinstance(box["error"], OnceError)
+    assert "inside its own call" in str(box["error"])
+    # a fresh call after that is fine and sees the failure
+    record = once.get("k")
+    assert record is not None and record.status is Status.FAILED
+    once.close()
+
+
+def test_recursive_async_call_raises_instead_of_hanging(tmp_path: Path) -> None:
+    once = Once(tmp_path / "once.db")
+
+    @once.tool
+    async def charge(n: int) -> int:
+        return await once.aexecute(charge, key="k", n=n)  # type: ignore[no-any-return]
+
+    async def main_() -> None:
+        with pytest.raises(OnceError, match="inside its own call"):
+            await asyncio.wait_for(once.aexecute(charge, key="k", n=1), 5)
+
+    asyncio.run(main_())
+    once.close()
+
+
+def test_a_later_task_started_by_fn_is_not_recursion(tmp_path: Path) -> None:
+    once = Once(tmp_path / "once.db")
+    tasks: list[asyncio.Task[Any]] = []
+
+    @once.tool
+    async def charge(n: int) -> int:
+        async def later() -> int:
+            await asyncio.sleep(0.05)
+            return await once.aexecute(charge, key="k", n=n)  # type: ignore[no-any-return]
+
+        tasks.append(asyncio.ensure_future(later()))
+        return n
+
+    async def main_() -> None:
+        assert await once.aexecute(charge, key="k", n=1) == 1
+        assert await tasks[0] == 1
+
+    asyncio.run(main_())
     once.close()

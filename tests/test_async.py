@@ -11,9 +11,9 @@ import pytest
 from once import (
     NOT_HAPPENED,
     EffectFailed,
-    EffectPending,
     EffectUnknown,
     Once,
+    OnceError,
     Status,
     args_hash,
     make_key,
@@ -375,7 +375,7 @@ def test_sync_call_inside_async_owner_does_not_deadlock(once: Once) -> None:
     async def outer(amount: int) -> str:
         # a blocking call on the loop thread for the same key must not wait
         # for the coroutine that is blocking it
-        with pytest.raises(EffectPending):
+        with pytest.raises(OnceError, match="inside its own call"):
             once.execute(inner, key="k", tool_name="charge", amount=amount)
         return "ok"
 
