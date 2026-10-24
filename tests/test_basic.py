@@ -239,9 +239,15 @@ def test_non_json_args_are_rejected_before_running(once: Once) -> None:
         nonlocal ran
         ran = True
 
-    with pytest.raises(TypeError, match="JSON serializable"):
+    with pytest.raises(TypeError, match="argument 'x' to 'f' must be JSON serializable"):
         once.execute(f, x=object())
     assert not ran
+
+    def g(a: int, b: dict[str, float]) -> None:
+        pass
+
+    with pytest.raises(TypeError, match="argument 'b' to 'g'"):
+        once.execute(g, a=1, b={"n": float("nan")})
 
 
 def test_exclude_leaves_params_out_of_the_key(once: Once) -> None:

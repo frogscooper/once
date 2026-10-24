@@ -445,7 +445,9 @@ class Once:
         try:
             canonical_json(call_args)
         except (TypeError, ValueError) as exc:
-            raise TypeError(f"arguments to {tool_name!r} must be JSON serializable") from exc
+            bad = next((name for name, v in call_args.items() if not _is_json(v)), None)
+            what = "arguments" if bad is None else f"argument {bad!r}"
+            raise TypeError(f"{what} to {tool_name!r} must be JSON serializable") from exc
 
         if key is None:
             key = explicit
@@ -708,7 +710,7 @@ class Once:
                     if token is not None:
                         return self._run_owned(trace, token, call.invoke, timeout, ttl)
                     continue
-                payload = _dumps(outcome)
+                payload = _verified(outcome, verify, call.tool_name)
                 done = self.store.take(record, Status.DONE, payload, expires_at=_expiry(ttl))
                 if done is not None:
                     trace.outcome, trace.status = "verified", Status.DONE
@@ -875,7 +877,7 @@ class Once:
                             trace, token, call.invoke, is_async, timeout, ttl
                         )
                     continue
-                payload = _dumps(outcome)
+                payload = _verified(outcome, verify, call.tool_name)
                 taken = await asyncio.to_thread(
                     self.store.take, record, Status.DONE, payload, None, _expiry(ttl)
                 )
@@ -1044,6 +1046,25 @@ def _statuses(
     if isinstance(status, str):  # Status is a str too
         return [Status(status)]
     return [Status(s) for s in status]
+
+
+def _is_json(value: Any) -> bool:
+    try:
+        canonical_json(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _verified(outcome: Any, verify: Any, tool_name: str) -> str:
+    try:
+        return _dumps(outcome)
+    except TypeError as exc:
+        name = getattr(verify, "__name__", None) or type(verify).__name__
+        raise TypeError(
+            f"verify function {name!r} for {tool_name!r} returned a value that is not "
+            f"JSON serializable: {exc}"
+        ) from exc
 
 
 def _dumps(value: Any) -> str:

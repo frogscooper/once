@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -108,10 +109,19 @@ def test_verify_result_must_be_json(once: Once) -> None:
     def verify(key: str, args: dict[str, Any]) -> Any:
         return object()
 
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="verify function 'verify' for 'charge' returned"):
         once.execute(charger, key="k", tool_name="charge", verify=verify, amount=100)
     record = once.get("k")
     assert record is not None and record.status is Status.UNKNOWN
+
+    async def averify(key: str, args: dict[str, Any]) -> Any:
+        return object()
+
+    async def acharge(amount: int) -> None:
+        pass
+
+    with pytest.raises(TypeError, match="verify function 'averify' for 'charge' returned"):
+        asyncio.run(once.aexecute(acharge, key="k", tool_name="charge", verify=averify, amount=100))
 
 
 def test_failed_is_not_verified(once: Once) -> None:
