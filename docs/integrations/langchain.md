@@ -1,7 +1,7 @@
 # LangChain and LangGraph
 
 ```
-pip install 'agent-once[langchain]'
+pip install 'agent-once[langchain] @ git+https://github.com/frogscooper/once'
 ```
 
 `once.integrations.langchain.once_tool` wraps a function for a LangChain tool. Put `@tool` on top:

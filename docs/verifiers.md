@@ -64,7 +64,7 @@ stripe_verifier(
 
     Any other status, such as `processing`, `requires_action` or `requires_payment_method`, raises `StripeInconclusive`, so the record stays unknown until it settles and you retry or `reset` it.
 - It only returns `NOT_HAPPENED` after reading the list to the end. If more than `scan` objects match the filters and the one it wants isn't among the newest `scan`, it raises `StripeInconclusive` and the record stays unknown. Narrow `list_params` or raise `scan`. With `scan=0` a search miss alone returns `NOT_HAPPENED`, so only use it with `stripe_params`.
-- `client` is a `stripe.StripeClient`, or anything shaped like one. Leave it out to build a `StripeClient` on first use from `api_key=` or `stripe.api_key`; that needs `pip install 'agent-once[stripe]'`.
+- `client` is a `stripe.StripeClient`, or anything shaped like one. Leave it out to build a `StripeClient` on first use from `api_key=` or `stripe.api_key`; that needs the `stripe` package (`pip install stripe`).
 
 Verify the PaymentIntent, not the charge. Charges made by a PaymentIntent don't copy its metadata, so a `"charge"` lookup only finds charges you tagged yourself.
 

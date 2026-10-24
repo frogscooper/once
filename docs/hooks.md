@@ -57,7 +57,7 @@ Hooks run inline, so keep them fast. In `aexecute` and async tools a hook may be
 ## OpenTelemetry
 
 ```
-pip install 'agent-once[otel]'
+pip install 'agent-once[otel] @ git+https://github.com/frogscooper/once'
 ```
 
 This adds `opentelemetry-api`. Each call through `execute`, `aexecute` or a decorated tool then makes a span named `once <tool_name>` with these attributes:
