@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal
 
 from ..core import NOT_HAPPENED, Verifier
+from ..exceptions import OnceError
 
 Kind = Literal["charge", "payment_intent", "refund"]
 
@@ -24,6 +25,14 @@ _UNAVAILABLE = re.compile(
     r"|(unavailable|not available|not enabled|not supported).{0,40}search",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+class StripeInconclusive(OnceError):
+    """Stripe can't say yet whether the effect happened, so the record stays unknown.
+
+    Raised when the list scan ran out before it saw every object, so a miss
+    proves nothing. Narrow the scan with ``list_params`` or raise ``scan``.
+    """
 
 
 def stripe_params(
@@ -72,7 +81,12 @@ def stripe_verifier(
     search is skipped from then on. With ``scan=0`` that error is raised.
 
     Returns the object as a plain dict (or ``result(obj)`` if given), or
-    NOT_HAPPENED. Other Stripe errors propagate, which leaves the record unknown.
+    NOT_HAPPENED. NOT_HAPPENED needs a list that was read to the end: if more
+    than ``scan`` objects match the filters and none of the first ``scan`` is
+    the one, StripeInconclusive is raised and the record stays unknown.
+    With ``scan=0`` a search miss alone returns NOT_HAPPENED, so only use it
+    with ``stripe_params``, whose Idempotency-Key makes a rerun safe for 24 hours.
+    Other Stripe errors propagate, which also leaves the record unknown.
     """
     if kind not in ("charge", "payment_intent", "refund"):
         raise ValueError(f"unsupported kind {kind!r}")
@@ -99,7 +113,12 @@ def stripe_verifier(
                 searchable[0] = False
         if found is None and scan:
             params = {**dict(list_params(args) if list_params else {}), "limit": min(scan, 100)}
-            found = _first(_take(service.list(params=params), scan), metadata_key, key)
+            found, complete = _scan(service.list(params=params), scan, metadata_key, key)
+            if found is None and not complete:
+                raise StripeInconclusive(
+                    f"no {kind} tagged {key!r} in the newest {scan}, and there are more;"
+                    " narrow list_params or raise scan"
+                )
         if found is None:
             return NOT_HAPPENED
         obj = _to_dict(found)
@@ -146,12 +165,23 @@ def _quote(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def _take(page: Any, limit: int) -> Iterable[Any]:
-    items = page.auto_paging_iter() if hasattr(page, "auto_paging_iter") else page.data
+def _scan(page: Any, limit: int, metadata_key: str, key: str) -> tuple[Any, bool]:
+    """Find the tagged object in the first ``limit`` items of a list.
+
+    Returns (object or None, whether the list was read to the end).
+    """
+    if hasattr(page, "auto_paging_iter"):
+        items = iter(page.auto_paging_iter())
+        more = False
+    else:
+        items = iter(page.data)
+        more = bool(getattr(page, "has_more", False))
     for i, item in enumerate(items):
         if i >= limit:
-            return
-        yield item
+            return None, False
+        if _first([item], metadata_key, key) is not None:
+            return item, True
+    return None, not more
 
 
 def _first(items: Iterable[Any], metadata_key: str, key: str) -> Any:

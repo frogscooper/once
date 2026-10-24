@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from once import NOT_HAPPENED, Once, Status
-from once.verifiers import stripe_params, stripe_verifier
+from once.verifiers import StripeInconclusive, stripe_params, stripe_verifier
 
 # An in-memory stand-in for stripe.StripeClient.
 
@@ -201,9 +201,48 @@ def test_scan_stops_at_the_limit(client: FakeStripeClient) -> None:
     refunds.create(**stripe_params("old", {}))
     for i in range(150):
         refunds.create(**stripe_params(f"k{i}", {}))
-    assert stripe_verifier("refund", client=client, scan=150)("old", {}) is NOT_HAPPENED
+    with pytest.raises(StripeInconclusive, match="newest 150"):
+        stripe_verifier("refund", client=client, scan=150)("old", {})
     assert stripe_verifier("refund", client=client, scan=151)("old", {})["id"] == "re_1"
     assert refunds.calls[-1][1]["limit"] == 100
+    assert stripe_verifier("refund", client=client, scan=151)("gone", {}) is NOT_HAPPENED
+
+
+def test_a_miss_past_the_scan_window_stays_unknown(
+    client: FakeStripeClient, tmp_path: Path
+) -> None:
+    once = Once(tmp_path / "once.db")
+    pis = client.v1.payment_intents
+    tool = charge_tool(client)
+    verify = stripe_verifier("payment_intent", client=client, scan=5)
+    pis.fail_next_create = True
+    with pytest.raises(TimeoutError):
+        once.execute(tool, key="k1", tool_name="charge", verify=verify, amount=1, customer="c")
+    for i in range(5):
+        pis.create(**stripe_params(f"later{i}", {"amount": 1}))
+    with pytest.raises(StripeInconclusive):
+        once.execute(tool, key="k1", tool_name="charge", verify=verify, amount=1, customer="c")
+    record = once.get("k1")
+    assert record is not None and record.status is Status.UNKNOWN
+    assert len(pis.objects) == 6
+    once.close()
+
+
+def test_has_more_on_a_plain_page_means_incomplete() -> None:
+    class Charges:
+        def __init__(self, has_more: bool) -> None:
+            self.has_more = has_more
+
+        def search(self, params: dict[str, Any]) -> Page:
+            return Page([])
+
+        def list(self, params: dict[str, Any]) -> Any:
+            return types.SimpleNamespace(data=[], has_more=self.has_more)
+
+    with pytest.raises(StripeInconclusive):
+        stripe_verifier("charge", client=types.SimpleNamespace(charges=Charges(True)))("k", {})
+    verify = stripe_verifier("charge", client=types.SimpleNamespace(charges=Charges(False)))
+    assert verify("k", {}) is NOT_HAPPENED
 
 
 def test_clients_without_v1_and_object_shaped_results() -> None:
