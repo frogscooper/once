@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -159,3 +160,58 @@ def test_cli_leaves_other_sqlite_files_alone(
     conn.close()
     assert tables == ["users"]
     assert mode == "delete"
+
+
+def test_finish_survives_one_store_error(db: str | Path) -> None:
+    once = Once(db)
+    real_finish = once.store.finish
+    fails = [sqlite3.OperationalError("connection lost")]
+
+    def flaky_finish(*args: Any, **kwargs: Any) -> bool:
+        if fails:
+            raise fails.pop()
+        return real_finish(*args, **kwargs)
+
+    once.store.finish = flaky_finish  # type: ignore[method-assign]
+    assert once.execute(lambda: "charged", key="k") == "charged"
+    assert once.get("k").status is Status.DONE  # type: ignore[union-attr]
+    once.store.finish = real_finish  # type: ignore[method-assign]
+    once.close()
+
+
+def test_async_finish_survives_one_store_error(db: str | Path) -> None:
+    once = Once(db)
+    real_finish = once.store.finish
+    fails = [sqlite3.OperationalError("connection lost")]
+
+    def flaky_finish(*args: Any, **kwargs: Any) -> bool:
+        if fails:
+            raise fails.pop()
+        return real_finish(*args, **kwargs)
+
+    once.store.finish = flaky_finish  # type: ignore[method-assign]
+
+    async def charge() -> str:
+        return "charged"
+
+    assert asyncio.run(once.aexecute(charge, key="k")) == "charged"
+    assert once.get("k").status is Status.DONE  # type: ignore[union-attr]
+    once.store.finish = real_finish  # type: ignore[method-assign]
+    once.close()
+
+
+def test_postgres_connection_drop_mid_call_still_records(pg_schema: str) -> None:
+    import psycopg
+
+    once = Once(pg_schema)
+    once.execute(lambda: None, key="warm")
+    pid = once.store._conn_obj.info.backend_pid  # type: ignore[attr-defined]
+
+    def charge() -> str:
+        with psycopg.connect(pg_schema, autocommit=True) as conn:
+            conn.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        return "charged"
+
+    assert once.execute(charge, key="k") == "charged"
+    assert once.get("k").status is Status.DONE  # type: ignore[union-attr]
+    once.close()

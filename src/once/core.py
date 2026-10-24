@@ -509,6 +509,27 @@ class Once:
         if entry is not None:
             entry.done.set()
 
+    def _finish(
+        self,
+        key: str,
+        token: str,
+        status: Status,
+        result: str | None = None,
+        error: str | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        """Store the outcome, retrying once if the store errors.
+
+        By now the effect has run, so a dropped connection should not leave
+        the record pending. finish is fenced by the token, so a retry after a
+        write that did land changes nothing.
+        """
+        try:
+            self.store.finish(key, token, status, result, error, expires_at)
+        except Exception:
+            logger.warning("once: storing the outcome of %s failed, retrying", key, exc_info=True)
+            self.store.finish(key, token, status, result, error, expires_at)
+
     def _give_back(self, key: str, token: str) -> None:
         """Undo a claim whose call never started, so the next caller runs it.
 
@@ -714,24 +735,24 @@ class Once:
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
         except _TimedOut as exc:
-            self.store.finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
+            self._finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
             trace.status = Status.UNKNOWN
             raise EffectUnknown(self._record(key)) from None
         except BaseException as exc:
             status = self._error_status(exc)
-            self.store.finish(key, token, status, error=_describe(exc))
+            self._finish(key, token, status, error=_describe(exc))
             trace.status = status
             raise
 
         try:
             payload = _dumps(result)
         except TypeError as exc:
-            self.store.finish(
+            self._finish(
                 key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
             )
             trace.status = Status.UNKNOWN
             raise EffectUnknown(self._record(key)) from exc
-        self.store.finish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
+        self._finish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
         trace.status = Status.DONE
         return _loads(payload)
 
@@ -877,7 +898,7 @@ class Once:
     ) -> None:
         # Shielded so the outcome is still written if we get cancelled again.
         await asyncio.shield(
-            asyncio.to_thread(self.store.finish, key, token, status, result, error, expires_at)
+            asyncio.to_thread(self._finish, key, token, status, result, error, expires_at)
         )
 
     async def _arun_owned(
