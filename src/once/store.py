@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 import sqlite3
 import threading
 import time
@@ -148,8 +149,19 @@ class Store(Protocol):
     def close(self) -> None: ...
 
 
+# postgres:// or postgresql://, any case, with an optional SQLAlchemy style
+# driver suffix such as +psycopg.
+_PG_SCHEME = re.compile(r"(?i)postgres(?:ql)?(?:\+\w+)?://")
+
+
 def is_postgres_dsn(target: object) -> bool:
-    return isinstance(target, str) and target.startswith(("postgresql://", "postgres://"))
+    return isinstance(target, str) and _PG_SCHEME.match(target) is not None
+
+
+def libpq_dsn(dsn: str) -> str:
+    """The DSN with its URL scheme rewritten to the plain postgresql:// libpq accepts."""
+    match = _PG_SCHEME.match(dsn)
+    return dsn if match is None else "postgresql://" + dsn[match.end() :]
 
 
 def open_store(target: str | Path, busy_timeout: float = 5.0) -> Store:

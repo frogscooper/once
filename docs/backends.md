@@ -5,7 +5,7 @@ Once(path=None, *, store=None, ...)
 ```
 
 - `path` is a SQLite file, `once.db` in the working directory by default.
-- A `path` that starts with `postgresql://` or `postgres://` opens a `PostgresStore` on table `once_effects` instead.
+- A `path` that starts with `postgresql://` or `postgres://` (any case, `postgresql+psycopg://` too) opens a `PostgresStore` on table `once_effects` instead.
 - `store` is a store object to use instead of `path`. Passing both raises `TypeError`.
 
 `once.close()` closes the store's connections, and the instance reconnects if used again. `Once` is also a context manager that closes on exit.

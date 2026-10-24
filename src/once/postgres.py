@@ -15,7 +15,16 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on what is installed
     raise ImportError("PostgresStore needs psycopg, pip install 'agent-once[postgres]'") from exc
 
-from .store import _COLUMNS, Record, Status, _cutoff, _next_token, _now, to_record
+from .store import (
+    _COLUMNS,
+    Record,
+    Status,
+    _cutoff,
+    _next_token,
+    _now,
+    libpq_dsn,
+    to_record,
+)
 
 DEFAULT_TABLE = "once_effects"
 
@@ -38,7 +47,8 @@ CREATE TABLE IF NOT EXISTS {table} (
 class PostgresStore:
     """Effect records in a Postgres table.
 
-    dsn: a libpq connection string or postgresql:// URL.
+    dsn: a libpq connection string or postgresql:// URL. The scheme can be
+        any case and can carry a driver suffix (postgresql+psycopg://).
     table: table name, optionally schema qualified ("myschema.effects").
         Created if missing, unless create is False. A table made before ttl
         support gets its expires_at column added either way.
@@ -61,7 +71,7 @@ class PostgresStore:
         parts = table.split(".")
         if not 1 <= len(parts) <= 2 or not all(parts):
             raise ValueError(f"bad table name {table!r}")
-        self.dsn = dsn
+        self.dsn = libpq_dsn(dsn)
         self.table = table
         self.connect_timeout = connect_timeout
         self._ident = sql.Identifier(*parts)

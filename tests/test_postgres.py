@@ -12,7 +12,7 @@ import pytest
 
 from once import Once, SQLiteStore, Status
 from once.cli import main
-from once.store import open_store
+from once.store import is_postgres_dsn, libpq_dsn, open_store
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -169,3 +169,29 @@ def test_cli_table_option(pg_schema: str, capsys: pytest.CaptureFixture[str]) ->
         once.execute(lambda: 1, key="abc")
     assert main(["ls", "--db", pg_schema, "--table", "mine"]) == 0
     assert capsys.readouterr().out.startswith("abc\tdone")
+
+
+def test_dsn_detection_ignores_case_and_driver_suffix() -> None:
+    for dsn in [
+        "postgresql://h/db",
+        "postgres://h/db",
+        "PostgreSQL://h/db",
+        "POSTGRES://h/db",
+        "postgresql+psycopg://h/db",
+        "Postgresql+Psycopg://h/db",
+    ]:
+        assert is_postgres_dsn(dsn), dsn
+        assert libpq_dsn(dsn) == "postgresql://h/db"
+    for path in ["once.db", "postgresql.db", "postgres:/x", "./postgresql+x/y.db"]:
+        assert not is_postgres_dsn(path), path
+    assert libpq_dsn("host=h dbname=db") == "host=h dbname=db"
+
+
+def test_sqlalchemy_style_dsn_opens_postgres(pg_schema: str) -> None:
+    from once.postgres import PostgresStore
+
+    dsn = "PostgreSQL+psycopg://" + pg_schema.split("://", 1)[1]
+    store = open_store(dsn)
+    assert isinstance(store, PostgresStore)
+    with Once(store=store) as once:
+        assert once.execute(lambda: 1, key="k") == 1
