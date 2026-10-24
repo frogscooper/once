@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
-from once import Once, Status
+import pytest
+
+from once import Hooks, Once, Status
 
 
 def test_timeout_keeps_scope(db: str | Path) -> None:
@@ -46,4 +49,47 @@ def test_huge_ttl_means_never_expire(db: str | Path) -> None:
     assert once.get("k").status is Status.DONE  # type: ignore[union-attr]
     assert once.execute(charge, key="k", ttl=timedelta.max) == "ok"
     assert len(calls) == 2
+    once.close()
+
+
+def test_interrupt_in_claim_hook_gives_the_claim_back(db: str | Path) -> None:
+    def on_claim(event: object) -> None:
+        raise KeyboardInterrupt
+
+    once = Once(db, hooks=Hooks(on_claim=on_claim))
+    calls: list[int] = []
+    with pytest.raises(KeyboardInterrupt):
+        once.execute(lambda: calls.append(1), key="k")
+    assert calls == []
+    assert once.get("k") is None
+    once.hooks = None
+    once.execute(lambda: calls.append(1), key="k")
+    assert calls == [1]
+    once.close()
+
+
+def test_cancel_in_async_claim_hook_gives_the_claim_back(db: str | Path) -> None:
+    started = asyncio.Event()
+
+    async def on_claim(event: object) -> None:
+        started.set()
+        await asyncio.sleep(10)
+
+    once = Once(db, hooks=Hooks(on_claim=on_claim))
+    calls: list[int] = []
+
+    async def charge() -> None:
+        calls.append(1)
+
+    async def main_() -> None:
+        task = asyncio.create_task(once.aexecute(charge, key="k"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main_())
+    assert calls == []
+    assert once.get("k") is None
+    assert once._inflight == {}
     once.close()

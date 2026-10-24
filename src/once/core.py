@@ -58,6 +58,8 @@ NOT_HAPPENED = _NotHappened.NOT_HAPPENED
 # changing the record under us.
 _MAX_ROUNDS = 5
 
+_NOT_STARTED = "interrupted before the call started"
+
 
 class _TimedOut(Exception):
     pass
@@ -92,6 +94,7 @@ class _Trace:
     outcome: Outcome | None = None
     status: Status | None = None
     waited: bool = False
+    started: bool = False  # the tool function was called
 
     def event(self, kind: Kind, record: Record | None, error: BaseException | None) -> Event:
         status = self.status if self.status is not None else Status.PENDING
@@ -506,6 +509,22 @@ class Once:
         if entry is not None:
             entry.done.set()
 
+    def _give_back(self, key: str, token: str) -> None:
+        """Undo a claim whose call never started, so the next caller runs it.
+
+        finish fences off the record first, so this never deletes a claim
+        someone else took over in the meantime.
+        """
+        try:
+            if self.store.finish(key, token, Status.FAILED, error=_NOT_STARTED):
+                record = self.store.get(key)
+                if record and record.status is Status.FAILED and record.error == _NOT_STARTED:
+                    self.store.delete(key)
+        except Exception:
+            logger.exception("once: could not give back the claim on %s", key)
+        finally:
+            self._release(key)
+
     def _record(self, key: str) -> Record:
         record = self.store.get(key)
         assert record is not None
@@ -674,7 +693,10 @@ class Once:
             error = exc
             raise
         finally:
-            self._release(trace.key)
+            if trace.started:
+                self._release(trace.key)
+            else:
+                self._give_back(trace.key, token)
             kind = self._finished(trace)
             if kind is not None:
                 self._emit(kind, trace, error=error)
@@ -688,6 +710,7 @@ class Once:
         ttl: float | None,
     ) -> Any:
         key = trace.key
+        trace.started = True
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
         except _TimedOut as exc:
@@ -841,7 +864,11 @@ class Once:
             error = exc
             raise
         finally:
-            self._release(trace.key)
+            if trace.started:
+                self._release(trace.key)
+            else:
+                # Shielded so the claim is given back even if we get cancelled again.
+                await asyncio.shield(asyncio.to_thread(self._give_back, trace.key, token))
             kind = self._finished(trace)
             if kind is not None:
                 await self._aemit(kind, trace, error=error)
@@ -856,6 +883,7 @@ class Once:
         ttl: float | None,
     ) -> Any:
         key = trace.key
+        trace.started = True
         raised: list[BaseException] = []
 
         async def tracked() -> Any:
