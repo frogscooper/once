@@ -1,8 +1,8 @@
 """OpenTelemetry spans for execute and aexecute.
 
 opentelemetry is imported on the first call, not when once is imported, and
-only if it is installed (pip install agent-once[otel]). Without a configured
-TracerProvider the API hands out no-op spans.
+only if it is installed (the agent-once[otel] extra, or pip install
+opentelemetry-api). Without a configured TracerProvider the API hands out no-op spans.
 """
 
 from __future__ import annotations
