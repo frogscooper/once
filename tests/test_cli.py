@@ -134,3 +134,12 @@ def test_python_dash_m(db: str | Path) -> None:
         check=True,
     ).stdout
     assert len(out.splitlines()) == 2
+
+
+def test_negative_limit_is_a_usage_error(
+    db: str | Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as info:
+        main(["ls", "--db", str(db), "--limit", "-1"])
+    assert info.value.code == 2
+    assert "must be 0 or more" in capsys.readouterr().err

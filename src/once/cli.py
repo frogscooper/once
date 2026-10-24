@@ -29,6 +29,16 @@ def parse_age(text: str) -> float:
     return float(match.group(1)) * _UNITS[match.group(2) or "s"]
 
 
+def _count(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"bad number {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{value} is negative, must be 0 or more")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
@@ -46,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
 
     ls = sub.add_parser("ls", parents=[common], help="list records")
     ls.add_argument("--status", action="append", choices=_STATUSES, help="filter, repeatable")
-    ls.add_argument("--limit", type=int, default=None)
+    ls.add_argument("--limit", type=_count, default=None)
 
     show = sub.add_parser("show", parents=[common], help="show one record")
     show.add_argument("key", help="key or a unique prefix of it")
