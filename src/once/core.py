@@ -115,6 +115,10 @@ def _ttl(ttl: TTL | None) -> float | None:
     seconds = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
     if math.isnan(seconds) or seconds <= 0:
         raise ValueError(f"ttl must be positive, got {ttl!r}")
+    try:
+        expiry(seconds)
+    except OverflowError:
+        return math.inf  # past year 9999, so it never runs out
     return seconds
 
 
