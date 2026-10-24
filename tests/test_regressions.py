@@ -261,18 +261,21 @@ def test_recursive_async_call_raises_instead_of_hanging(tmp_path: Path) -> None:
 def test_a_later_task_started_by_fn_is_not_recursion(tmp_path: Path) -> None:
     once = Once(tmp_path / "once.db")
     tasks: list[asyncio.Task[Any]] = []
+    outer_done: list[asyncio.Event] = []
 
     @once.tool
     async def charge(n: int) -> int:
         async def later() -> int:
-            await asyncio.sleep(0.05)
+            await outer_done[0].wait()  # a timed sleep raced the outer call on slow CI
             return await once.aexecute(charge, key="k", n=n)  # type: ignore[no-any-return]
 
         tasks.append(asyncio.ensure_future(later()))
         return n
 
     async def main_() -> None:
+        outer_done.append(asyncio.Event())
         assert await once.aexecute(charge, key="k", n=1) == 1
+        outer_done[0].set()
         assert await tasks[0] == 1
 
     asyncio.run(main_())
