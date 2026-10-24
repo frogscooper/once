@@ -558,9 +558,11 @@ class Once:
         finally:
             self._release(key)
 
-    def _record(self, key: str) -> Record:
+    def _record(self, key: str, error: str) -> Record:
+        """The stored record, or a stand-in if it was reset in the meantime."""
         record = self.store.get(key)
-        assert record is not None
+        if record is None:
+            return Record(key, Status.UNKNOWN, None, error, None, "", "")
         return record
 
     # hooks
@@ -765,9 +767,10 @@ class Once:
         try:
             result = call() if timeout is None else _call_with_timeout(call, timeout)
         except _TimedOut as exc:
-            self._finish(key, token, Status.UNKNOWN, error=f"timeout: {exc}")
+            error = f"timeout: {exc}"
+            self._finish(key, token, Status.UNKNOWN, error=error)
             trace.status = Status.UNKNOWN
-            raise EffectUnknown(self._record(key)) from None
+            raise EffectUnknown(self._record(key, error)) from None
         except BaseException as exc:
             status = self._error_status(exc)
             self._finish(key, token, status, error=_describe(exc))
@@ -777,11 +780,10 @@ class Once:
         try:
             payload = _dumps(result)
         except TypeError as exc:
-            self._finish(
-                key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
-            )
+            error = f"result is not JSON serializable: {exc}"
+            self._finish(key, token, Status.UNKNOWN, error=error)
             trace.status = Status.UNKNOWN
-            raise EffectUnknown(self._record(key)) from exc
+            raise EffectUnknown(self._record(key, error)) from exc
         self._finish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
         trace.status = Status.DONE
         return _loads(payload)
@@ -1004,11 +1006,10 @@ class Once:
                 and not any(e is exc for e in raised)
             )
             if timed_out:
-                await self._afinish(
-                    key, token, Status.UNKNOWN, error=f"timeout: no response after {timeout}s"
-                )
+                error = f"timeout: no response after {timeout}s"
+                await self._afinish(key, token, Status.UNKNOWN, error=error)
                 trace.status = Status.UNKNOWN
-                raise EffectUnknown(await asyncio.to_thread(self._record, key)) from None
+                raise EffectUnknown(await asyncio.to_thread(self._record, key, error)) from None
             status = self._error_status(exc)
             await self._afinish(key, token, status, error=_describe(exc))
             trace.status = status
@@ -1017,11 +1018,10 @@ class Once:
         try:
             payload = _dumps(result)
         except TypeError as exc:
-            await self._afinish(
-                key, token, Status.UNKNOWN, error=f"result is not JSON serializable: {exc}"
-            )
+            error = f"result is not JSON serializable: {exc}"
+            await self._afinish(key, token, Status.UNKNOWN, error=error)
             trace.status = Status.UNKNOWN
-            raise EffectUnknown(await asyncio.to_thread(self._record, key)) from exc
+            raise EffectUnknown(await asyncio.to_thread(self._record, key, error)) from exc
         await self._afinish(key, token, Status.DONE, result=payload, expires_at=_expiry(ttl))
         trace.status = Status.DONE
         return _loads(payload)

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from once import Hooks, Once, OnceError, Status
+from once import EffectUnknown, Hooks, Once, OnceError, Status
 from once.cli import main
 
 
@@ -290,4 +290,33 @@ def test_exclude_with_an_unknown_name_raises_when_decorating(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="not parameters of charge"):
         once.tool(exclude="ctx")(charge)  # a str is a collection of letters
     assert once.tool(exclude=["ctx"])(charge)(1, ctx=object()) == 1
+    once.close()
+
+
+def _reset_right_after_finish(once: Once) -> None:
+    finish = once.store.finish
+
+    def finish_then_reset(key: str, *args: Any, **kwargs: Any) -> Any:
+        out = finish(key, *args, **kwargs)
+        once.store.delete(key)
+        return out
+
+    once.store.finish = finish_then_reset  # type: ignore[method-assign]
+
+
+def test_unknown_after_a_concurrent_reset_still_raises_effect_unknown(db: str | Path) -> None:
+    once = Once(db)
+    _reset_right_after_finish(once)
+    with pytest.raises(EffectUnknown) as info:
+        once.execute(lambda: object(), key="k", tool_name="t")
+    assert info.value.key == "k"
+    assert info.value.record.status is Status.UNKNOWN
+    assert "not JSON serializable" in (info.value.record.error or "")
+
+    async def main_() -> None:
+        with pytest.raises(EffectUnknown) as info:
+            await once.aexecute(lambda: object(), key="k2", tool_name="t")
+        assert info.value.record.status is Status.UNKNOWN
+
+    asyncio.run(main_())
     once.close()
