@@ -1,6 +1,6 @@
 site_name: once
 site_description: Run side-effecting agent tool calls at most once per idempotency key.
-site_url: https://frogscooper.github.io/once/
+site_url: https://frogscooper.dev/once/
 repo_url: https://github.com/frogscooper/once
 repo_name: frogscooper/once
 edit_uri: edit/main/docs/

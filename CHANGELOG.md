@@ -23,6 +23,22 @@ First release.
 - `Once(hooks=Hooks(...))` with `on_claim`, `on_done`, `on_failed`, `on_unknown` and `on_replay`. Hooks get an `Event`, may be async under `aexecute`, and an error in one is logged, not raised.
 - OpenTelemetry spans (`once <tool_name>`) behind the `otel` extra. No-op without a configured tracer.
 
+Fixes from a review before the release:
+
+- A sync call with `timeout=` runs in a thread that keeps the caller's context, so `once.scope()` and tracing still apply inside it.
+- A `ttl` that would expire after year 9999 is treated as never expiring instead of raising `OverflowError`.
+- A claim is given back if the call is interrupted (or an async store step is cancelled) before the tool starts, so the key isn't left pending.
+- Storing the outcome is retried once after a store error, so a dropped connection doesn't leave a finished call pending.
+- Calling the same key from inside its own call raises `OnceError` instead of deadlocking. This includes a sync call inside an async owner.
+- `exclude=` names that are not parameters of the function raise an error.
+- `EffectUnknown` is raised even if the record was reset while the call was finishing.
+- `stripe_verifier` reads the status of the object it finds: failed or canceled counts as not happened, and a status still in flux raises `StripeInconclusive` so the record stays unknown. It also stays unknown when the list scan runs out before the end.
+- `http_verifier` JSON-encodes non-string arguments in the URL, and rejects an argument named `key` that would clash with `{key}`.
+- `PostgresStore` takes `statement_timeout` (30 seconds by default) and retries a statement once after a dropped connection. Postgres URLs are accepted in any case and with `+psycopg`.
+- The CLI refuses SQLite files without an effects table and rejects a negative `--limit`.
+- JSON errors name the argument or the verify function that couldn't be serialized.
+- README and docs have a Gotchas section.
+
 Changes made before the release that break keys from earlier development builds:
 
 - `make_key` is now `sha256(canonical_json([tool_name, args, scope]))`. It used to concatenate the parts, which let some tool names and scopes collide.

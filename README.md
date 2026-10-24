@@ -4,6 +4,8 @@
 
 Agents retry after timeouts, crash and resume, or re-plan and call the same tool twice. `once` records every call in SQLite (or Postgres) under an idempotency key so the duplicates do nothing.
 
+Docs: https://frogscooper.dev/once/
+
 ## Install
 
 ```
