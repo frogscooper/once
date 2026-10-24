@@ -95,11 +95,39 @@ def test_reconnects_after_connection_loss(pg_schema: str) -> None:
     pid = conn.info.backend_pid
     with psycopg.connect(pg_schema, autocommit=True) as admin:
         admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
-    with pytest.raises(psycopg.OperationalError):
-        once.get("a")
-    record = once.get("a")  # new connection
+    record = once.get("a")  # reconnects and retries once
     assert record is not None and record.status is Status.DONE
+    pid = once.store._conn().info.backend_pid  # type: ignore[attr-defined]
+    with psycopg.connect(pg_schema, autocommit=True) as admin:
+        admin.execute("SELECT pg_terminate_backend(%s)", (pid,))
+    assert once.execute(lambda: 2, key="b") == 2
     once.close()
+
+
+def test_statement_timeout(pg_schema: str) -> None:
+    import psycopg
+
+    from once.postgres import PostgresStore
+
+    def show(store: PostgresStore) -> str:
+        row = store._execute("SHOW statement_timeout").fetchone()
+        assert row is not None
+        return str(row[0])
+
+    default = PostgresStore(pg_schema)
+    assert show(default) == "30s"
+    default.close()
+    assert show(default) == "30s"  # set again on a new connection
+    default.close()
+    off = PostgresStore(pg_schema, statement_timeout=None)
+    assert show(off) == "0"
+    off.close()
+    short = PostgresStore(pg_schema, statement_timeout=0.2)
+    assert show(short) == "200ms"
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        short._execute("SELECT pg_sleep(2)")
+    assert show(short) == "200ms"  # still the same connection, not retried
+    short.close()
 
 
 def test_threads_create_the_table_at_once(pg_schema: str) -> None:

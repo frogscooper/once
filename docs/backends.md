@@ -43,13 +43,14 @@ once = Once(store=PostgresStore("postgresql://user:pass@db/app", table="agent.ef
 ```
 
 ```python
-PostgresStore(dsn, *, table="once_effects", create=True, connect_timeout=10.0)
+PostgresStore(dsn, *, table="once_effects", create=True, connect_timeout=10.0, statement_timeout=30.0)
 ```
 
 - `dsn` is a libpq connection string or `postgresql://` URL.
 - `table` may be schema qualified, like `"agent.effects"`. The schema must already exist. Anything else with dots in it raises `ValueError`.
 - `create=False` skips `CREATE TABLE`, for a table you manage yourself. It still runs the one-time `expires_at` migration on an older table (`ALTER TABLE ... ADD COLUMN` and `CREATE INDEX`), so the database user needs those rights once, or you add the column and index yourself.
 - `connect_timeout` is in seconds.
+- `statement_timeout` is how many seconds one statement may run before the server cancels it, with `SET statement_timeout` on each new connection. Every statement here is a single-row read or write, so 30 is generous; it is there so a lock or a stuck server fails the call instead of hanging it. `None` leaves the server setting alone.
 
 Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `ttl`, `aexecute`, `reset`, `records` and `purge`. The claim is the same `INSERT ... ON CONFLICT DO NOTHING`, and finishing or taking over a record is an `UPDATE` that only matches if the row is unchanged, so the database decides who runs a call, not anything in your process.
 
@@ -57,7 +58,7 @@ Things to know:
 
 - Timestamps come from each worker's clock, so `stale_after` and `ttl` across hosts assume the clocks are roughly in sync. Keep `stale_after` well above both your longest tool call and any drift.
 - Each `PostgresStore`, and so each `Once`, holds one connection in autocommit mode, shared by its threads behind a lock.
-- If the connection drops, the call that hit it fails, and the next call opens a new connection.
+- If the connection drops, the statement is retried once on a new connection, and fails if that fails too. A write that landed but lost its reply then looks like it lost a race, which is the safe side: the call raises `EffectPending` instead of running twice.
 
 The [CLI](cli.md) takes a URL too: `once ls --db postgresql://... --table agent.effects`.
 

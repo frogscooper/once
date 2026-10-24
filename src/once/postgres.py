@@ -6,8 +6,8 @@ Needs psycopg 3: pip install 'agent-once[postgres]'.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, TypeVar
 
 try:
     import psycopg
@@ -27,6 +27,8 @@ from .store import (
 )
 
 DEFAULT_TABLE = "once_effects"
+
+T = TypeVar("T")
 
 # Timestamps are stored as text in the same format SQLiteStore uses. The exact
 # string is the owner token, so it must round-trip unchanged.
@@ -53,11 +55,17 @@ class PostgresStore:
         Created if missing, unless create is False. A table made before ttl
         support gets its expires_at column added either way.
 
+    connect_timeout: seconds to wait for a connection.
+    statement_timeout: seconds any one statement may run before the server
+        cancels it, 30 by default. None leaves the server's setting alone.
+
     One connection per store, in autocommit mode, shared by all threads with a
     lock. Every statement is its own transaction, so no row stays locked
     between calls. Safety between processes and hosts comes from the primary
     key and the conditional updates, not from anything in this process.
-    A dropped connection is reopened on the next call.
+    If the connection drops, the statement is retried once on a new one. A
+    write that landed but lost its reply then looks like it lost a race,
+    which is the safe side: the call reports pending instead of running twice.
     """
 
     def __init__(
@@ -67,6 +75,7 @@ class PostgresStore:
         table: str = DEFAULT_TABLE,
         create: bool = True,
         connect_timeout: float = 10.0,
+        statement_timeout: float | None = 30.0,
     ) -> None:
         parts = table.split(".")
         if not 1 <= len(parts) <= 2 or not all(parts):
@@ -74,6 +83,9 @@ class PostgresStore:
         self.dsn = libpq_dsn(dsn)
         self.table = table
         self.connect_timeout = connect_timeout
+        if statement_timeout is not None and statement_timeout < 0:
+            raise ValueError("statement_timeout must be None or 0 or more")
+        self.statement_timeout = statement_timeout
         self._ident = sql.Identifier(*parts)
         # The index lives in the table's schema, so CREATE INDEX takes the bare
         # name and the lookup takes the qualified one.
@@ -92,12 +104,31 @@ class PostgresStore:
             conn = psycopg.connect(
                 self.dsn, autocommit=True, connect_timeout=max(1, int(self.connect_timeout))
             )
+            if self.statement_timeout is not None:
+                ms = sql.Literal(round(self.statement_timeout * 1000))
+                try:
+                    conn.execute(sql.SQL("SET statement_timeout = {}").format(ms))
+                except BaseException:
+                    conn.close()
+                    raise
             self._conn_obj = conn
         return conn
 
-    def _execute(self, query: str, params: Sequence[Any] = ()) -> psycopg.Cursor[Any]:
+    def _retrying(self, run: Callable[[psycopg.Connection[Any]], T]) -> T:
+        """Run on the connection, and once more on a new one if it dropped."""
         with self._lock:
-            return self._conn().execute(self._q(query), params)
+            conn = self._conn()
+            try:
+                return run(conn)
+            except (psycopg.OperationalError, psycopg.InterfaceError):
+                # A statement timeout is an OperationalError too, but it leaves
+                # the connection usable, so it is not retried.
+                if not (conn.closed or conn.broken):
+                    raise
+            return run(self._conn())
+
+    def _execute(self, query: str, params: Sequence[Any] = ()) -> psycopg.Cursor[Any]:
+        return self._retrying(lambda conn: conn.execute(self._q(query), params))
 
     def _setup(self, create: bool) -> None:
         # Concurrent CREATE TABLE IF NOT EXISTS can fail on a unique index in
@@ -134,10 +165,11 @@ class PostgresStore:
                     )
 
     def table_exists(self) -> bool:
-        with self._lock:
-            conn = self._conn()
+        def run(conn: psycopg.Connection[Any]) -> Any:
             name = self._ident.as_string(conn)
-            row = conn.execute("SELECT to_regclass(%s)", (name,)).fetchone()
+            return conn.execute("SELECT to_regclass(%s)", (name,)).fetchone()
+
+        row = self._retrying(run)
         return row is not None and row[0] is not None
 
     def close(self) -> None:

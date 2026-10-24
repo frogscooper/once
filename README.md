@@ -318,7 +318,7 @@ once = Once("postgresql://user:pass@db/app")  # table once_effects, created if m
 once = Once(store=PostgresStore("postgresql://user:pass@db/app", table="agent.effects"))
 ```
 
-Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `aexecute`, `reset`, `records` and `purge`. The claim is the same `INSERT ... ON CONFLICT DO NOTHING`, and finishing or taking over a record is an `UPDATE` that only matches if the row is unchanged, so the database decides who runs the call, not anything in your process. Each `Once` holds one connection in autocommit mode and reopens it if it drops. The CLI takes a URL too: `once ls --db postgresql://... [--table agent.effects]`.
+Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `aexecute`, `reset`, `records` and `purge`. The claim is the same `INSERT ... ON CONFLICT DO NOTHING`, and finishing or taking over a record is an `UPDATE` that only matches if the row is unchanged, so the database decides who runs the call, not anything in your process. Each `Once` holds one connection in autocommit mode, retries a statement once on a new connection if it drops, and sets a 30 second `statement_timeout` (`PostgresStore(..., statement_timeout=None)` to skip). The CLI takes a URL too: `once ls --db postgresql://... [--table agent.effects]`.
 
 Timestamps come from each worker's clock, so `stale_after` assumes the machines' clocks are roughly in sync. Keep it well above both your longest tool call and any clock drift.
 
