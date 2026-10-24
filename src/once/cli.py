@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -76,7 +77,25 @@ def _open(path: str, table: str) -> Store:
         return pg
     if not Path(path).is_file():
         raise _UsageError(f"no database at {path}")
+    if not _has_effects_table(path):
+        raise _UsageError(f"no effects table in {path}")
     return SQLiteStore(path)
+
+
+def _has_effects_table(path: str) -> bool:
+    """Check without writing, so the CLI never changes a file that is not ours."""
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'effects'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise _UsageError(f"cannot read {path}: {exc}") from None
+    return row is not None
 
 
 def _resolve(store: Store, key: str) -> str:

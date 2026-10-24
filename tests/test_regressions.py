@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from once import Hooks, Once, Status
+from once.cli import main
 
 
 def test_timeout_keeps_scope(db: str | Path) -> None:
@@ -137,3 +139,23 @@ def test_cancel_during_async_claim_does_not_leak(db: str | Path) -> None:
     # a sync caller is not stuck waiting on a call that never ran
     assert once.execute(lambda: 2, key="k") == 2
     once.close()
+
+
+def test_cli_leaves_other_sqlite_files_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "app.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE users (id INTEGER)")
+    conn.commit()
+    conn.close()
+    before = path.read_bytes()
+    assert main(["ls", "--db", str(path)]) != 0
+    assert "effects" in capsys.readouterr().err
+    assert path.read_bytes() == before
+    conn = sqlite3.connect(path)
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+    assert tables == ["users"]
+    assert mode == "delete"
