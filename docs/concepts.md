@@ -75,7 +75,10 @@ def charge_card(amount: int, customer: str, idempotency_key: str | None = None) 
 
 A process that dies mid-call leaves its record `pending` forever. `Once(stale_after=600)` treats a pending record older than 600 seconds as abandoned and hands it to `verify`, if the call has one. Without `verify`, nothing changes: `once` never re-runs a call unless a callback says the effect did not happen.
 
-Pick a value well above the tool's longest run, since a pending record that is merely slow looks the same as a dead one. A record that was taken over can no longer be written by its old owner: each owner holds a token, and the store only accepts the outcome while the token still matches.
+!!! warning "stale_after can run a call twice"
+    A pending record that is merely slow looks the same as a dead one. If the call is still running when its record turns stale, `verify` may not see the effect yet, say it did not happen, and the call runs again while the first run is still going. Pick a value well above the tool's longest run, and prefer a `verify` backed by the downstream idempotency key.
+
+Pick a value well above the tool's longest run. A record that was taken over can no longer be written by its old owner: each owner holds a token, and the store only accepts the outcome while the token still matches.
 
 With Postgres and workers on several hosts, the record's age comes from each worker's clock, so keep `stale_after` well above any clock drift too.
 
@@ -112,3 +115,14 @@ If the function has an `idempotency_key` parameter:
 - If the caller passes a non-empty `idempotency_key`, that value is the key. `""` and `None` mean "compute one".
 
 Each record also stores a hash of the tool name and arguments. Reusing a key with different arguments raises `KeyConflict`, unless the old record has [expired](ttl.md).
+
+## Gotchas
+
+- **Keys follow the JSON.** `10` and `10.0` give different keys. A tuple and a list with the same items give the same key, and so do `{1: "a"}` and `{"1": "a"}`, since JSON object keys are strings; a dict that mixes key types can't be serialized at all. Adding a parameter with a default changes every key for that tool, because defaults are part of the key, so old records stop matching. Leave the new parameter out with `exclude=`, or pass `key=` yourself.
+- **`execute` takes some names for itself.** `key`, `tool_name`, `scope`, `timeout`, `verify` and `ttl` go to `execute`, not to your function. If your function has a parameter with one of those names, use `@once.tool`, which passes all arguments through.
+- **Sync calls block the event loop.** A sync `execute` or sync tool called from async code holds the loop for the whole call, store access included. Use `aexecute` or an `async def` tool there. On the loop's thread, a sync call for a key a coroutine on that loop is running raises `EffectPending`.
+- **Calling the same key from inside its own call** raises `OnceError` instead of waiting on itself forever. Use a different key for the inner call.
+- **`close()` is not the end.** It closes the store's connections, including the SQLite connections other threads opened, and the next call opens new ones. Don't call it while other threads are mid-call; close once, at shutdown.
+- **MCP: pass `scope_arg`.** The default scope is the MCP session id, and a client that reconnects gets a new one, so a retry after a reconnect runs again. Name an argument that identifies the effect, like `scope_arg="order_id"`.
+- **`stale_after` can run a call twice.** See the warning [above](#stale_after).
+- **Some Stripe statuses stay unknown.** `stripe_verifier` raises on a PaymentIntent that is `processing` or waiting on the customer, so the record stays `unknown` until you look and `reset` it. See [verifiers](verifiers.md).

@@ -322,6 +322,17 @@ Everything works the same as with SQLite: statuses, `verify`, `stale_after`, `ae
 
 Timestamps come from each worker's clock, so `stale_after` assumes the machines' clocks are roughly in sync. Keep it well above both your longest tool call and any clock drift.
 
+## Gotchas
+
+- **Keys follow the JSON.** `10` and `10.0` give different keys. A tuple and a list with the same items give the same key, and so do `{1: "a"}` and `{"1": "a"}`, since JSON object keys are strings. Adding a parameter with a default changes every key for that tool, because defaults are part of the key, so old records stop matching. Leave the new parameter out with `exclude=`, or pass `key=` yourself.
+- **`execute` takes some names for itself.** `key`, `tool_name`, `scope`, `timeout`, `verify` and `ttl` go to `execute`, not to your function. If your function has a parameter with one of those names, use `@once.tool` instead.
+- **Sync calls block the event loop.** A sync `execute` or sync tool called from async code holds the loop for the whole call. Use `aexecute` or an `async def` tool there.
+- **Calling the same key from inside its own call raises `OnceError`**, since it would wait on itself.
+- **`close()` is not the end.** It closes the store's connections, including other threads' SQLite connections, and the next call opens new ones. Don't call it while other threads are mid-call.
+- **MCP: pass `scope_arg`.** The default scope is the MCP session id, and a client that reconnects gets a new one, so a retry after a reconnect runs again. Name an argument that identifies the effect, like `scope_arg="order_id"`.
+- **`stale_after` can run a call twice.** If a call is still running when its record turns stale, `verify` may not see the effect yet and say it did not happen, and the call runs a second time. Set `stale_after` well above the slowest run, and prefer a `verify` backed by the downstream idempotency key.
+- **Some Stripe statuses stay unknown.** `stripe_verifier` raises on a PaymentIntent that is `processing` or waiting on the customer, so the record stays `unknown` until you look and `reset` it.
+
 ## Limitations
 
 This is at-most-once, not exactly-once. If the process dies after the side effect happens but before the result is written, the record stays `pending` and the call will not run again unless you set `stale_after` and a `verify` callback. That is on purpose: running it twice is the thing we are trying to avoid. You need to look at the downstream system and then `reset` the key or leave it.
