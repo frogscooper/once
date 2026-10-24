@@ -181,3 +181,18 @@ def test_works_from_aexecute(db: str | Path, server: Server) -> None:
 
     assert asyncio.run(run()) == {"id": "em_1"}
     once.close()
+
+
+def test_non_string_args_are_json_encoded(server: Server) -> None:
+    verify = http_verifier(server.url + "/x?a={a}&b={b}&c={c}&d={d}&e={e}")
+    verify("k", {"a": None, "b": True, "c": 3, "d": [1, "x"], "e": "plain"})
+    assert server.seen[-1][1] == "/x?a=null&b=true&c=3&d=%5B1%2C%22x%22%5D&e=plain"
+
+
+def test_a_tool_arg_named_key_clashes_with_the_once_key(server: Server) -> None:
+    verify = http_verifier(server.url + "/emails/{key}")
+    with pytest.raises(ValueError, match="argument named 'key'"):
+        verify("k", {"key": "mine"})
+    # Not in the template, so nothing is ambiguous.
+    server.json("/emails/to/a", {"ok": 1})
+    assert http_verifier(server.url + "/emails/to/{to}")("k", {"key": 1, "to": "a"}) == {"ok": 1}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import string
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Mapping
@@ -28,7 +29,10 @@ def http_verifier(
 
     url is a template. ``{key}`` is the once key and any other ``{name}`` is
     the tool argument of that name, each percent-encoded, for example
-    ``"https://api.example.com/orders/{order_id}/emails/{key}"``.
+    ``"https://api.example.com/orders/{order_id}/emails/{key}"``. Strings go
+    in as they are; other values as JSON, so None is ``null`` and True is
+    ``true``. A tool argument named ``key`` with ``{key}`` in the template
+    raises ValueError, since the template can't tell the two apart.
 
     A status in ``happened`` returns the response body: parsed JSON, the text
     if it is not JSON, or None if it is empty. A status in ``not_happened``
@@ -43,9 +47,15 @@ def http_verifier(
     not_happened = frozenset(not_happened)
     if happened & not_happened:
         raise ValueError("a status can't be in both happened and not_happened")
+    uses_key = "key" in {field for _, field, _, _ in string.Formatter().parse(url) if field}
 
     def verify(key: str, args: dict[str, Any]) -> Any:
-        fields = {name: quote(str(value), safe="") for name, value in args.items()}
+        if uses_key and "key" in args:
+            raise ValueError(
+                "the tool has an argument named 'key', so {key} in the url is ambiguous; "
+                "rename the argument"
+            )
+        fields = {name: quote(_text(value), safe="") for name, value in args.items()}
         fields["key"] = quote(key, safe="")
         request = urllib.request.Request(
             url.format_map(fields), method=method, headers=dict(headers or {})
@@ -64,6 +74,12 @@ def http_verifier(
         return result(value) if result is not None else value
 
     return verify
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
 
 
 def _parse(body: bytes) -> Any:

@@ -98,7 +98,7 @@ http_verifier(
 )
 ```
 
-- `url` is a template. `{key}` is the once key and any other `{name}` is the tool argument of that name, each percent-encoded.
+- `url` is a template. `{key}` is the once key and any other `{name}` is the tool argument of that name, each percent-encoded. Strings go in as they are and other values as JSON (`null`, `true`, `3`). A tool argument named `key` raises `ValueError` when the template has `{key}`; rename the argument.
 - A status in `happened` returns the body: parsed JSON, the text if it is not JSON, or None if it is empty.
 - A status in `not_happened` returns `NOT_HAPPENED`, so the call runs again.
 - Any other status, or a network error, raises, which leaves the record unknown.
