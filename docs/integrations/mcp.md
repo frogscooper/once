@@ -1,7 +1,7 @@
 # MCP
 
 ```
-pip install 'agent-once[mcp] @ git+https://github.com/frogscooper/once'
+pip install 'agent-once[mcp]'
 ```
 
 `once.integrations.mcp.once_tool` wraps an MCP server tool. Register the result with your server as usual:

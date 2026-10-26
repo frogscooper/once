@@ -4,7 +4,7 @@ No API key needed: the tool is called directly, twice for the same order, the
 way an agent calls it again when a task is retried. In a crew, the same tool
 goes in ``Agent(tools=[...])``.
 
-    pip install git+https://github.com/frogscooper/once crewai
+    pip install agent-once crewai
     python examples/crewai_example.py
 """
 
