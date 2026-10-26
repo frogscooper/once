@@ -3,7 +3,7 @@
 No API key needed: a FunctionModel asks for the same tool call every run, the
 way a real model does when a turn is retried.
 
-    pip install git+https://github.com/frogscooper/once pydantic-ai-slim
+    pip install agent-once pydantic-ai-slim
     python examples/pydantic_ai_example.py
 """
 

@@ -3,7 +3,7 @@
 The model passes an order id; that is the scope, so a retried or replayed
 call for the same order returns the stored charge instead of charging again.
 
-    pip install git+https://github.com/frogscooper/once mcp
+    pip install agent-once mcp
     python examples/mcp_server.py          # serve over stdio
     python examples/mcp_server.py --demo   # call the tool twice in-process
 """
