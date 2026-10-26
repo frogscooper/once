@@ -1,5 +1,7 @@
 # once
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/frogscooper-once-bbz0ey?v=40e24baa3d2614a2be9a544f0275caf6)](https://m8ven.ai/mcp/frogscooper-once-bbz0ey?s=readme)
+
 `once` makes side-effecting tool calls (charge a card, send an email, create a ticket) safe for an AI agent to retry. Each distinct call runs at most once; a replay gets the stored result instead of running the side effect again.
 
 Agents retry after timeouts, crash and resume, or re-plan and call the same tool twice. `once` records every call in SQLite (or Postgres) under an idempotency key so the duplicates do nothing.
