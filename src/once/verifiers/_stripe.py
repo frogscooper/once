@@ -79,7 +79,7 @@ def stripe_verifier(
     stripe.StripeClient, or anything shaped like one (tests pass a fake). If
     it is None, a StripeClient is made on first use from api_key (or
     stripe.api_key), which needs the stripe package
-    (the ``agent-once[stripe]`` extra, or ``pip install stripe``).
+    (``pip install agent-once[stripe]``).
 
     Charges and PaymentIntents are looked up with the search API first. Search
     can lag new objects by a minute or so, so if it finds nothing, the newest
@@ -173,8 +173,7 @@ def _default_client(api_key: str | None) -> Any:
         stripe = importlib.import_module("stripe")
     except ImportError as exc:
         raise ImportError(
-            "stripe_verifier needs the stripe package (the agent-once[stripe] extra)"
-            " or a client: pip install stripe"
+            "stripe_verifier needs the stripe package or a client: pip install 'agent-once[stripe]'"
         ) from exc
     return stripe.StripeClient(api_key or stripe.api_key)
 

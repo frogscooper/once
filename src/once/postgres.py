@@ -1,6 +1,6 @@
 """Postgres storage for effect records, for workers on more than one machine.
 
-Needs psycopg 3, the agent-once[postgres] extra (pip install 'psycopg[binary]').
+Needs psycopg 3: pip install 'agent-once[postgres]'.
 """
 
 from __future__ import annotations
@@ -13,10 +13,7 @@ try:
     import psycopg
     from psycopg import sql
 except ImportError as exc:  # pragma: no cover - depends on what is installed
-    raise ImportError(
-        "PostgresStore needs psycopg 3, the agent-once[postgres] extra:"
-        " pip install 'psycopg[binary]'"
-    ) from exc
+    raise ImportError("PostgresStore needs psycopg, pip install 'agent-once[postgres]'") from exc
 
 from .store import (
     _COLUMNS,
