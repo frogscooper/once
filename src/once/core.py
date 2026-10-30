@@ -277,8 +277,9 @@ class Once:
         such as ``lambda a: a["order_id"]``. The key is then
         make_key(name, {"key": value}, scope), and calls with the same value
         replay the stored result even if other arguments differ. A non-empty
-        ``idempotency_key`` from the caller still wins. ``key`` can't be
-        combined with ``exclude``.
+        ``idempotency_key`` from the caller still wins, and the stored hash is
+        still only the value. ``key`` gets a copy, so changing it doesn't
+        change the call. ``key`` can't be combined with ``exclude``.
         """
         if key is not None and exclude:
             raise ValueError("pass key or exclude, not both: with key, exclude has no effect")
@@ -298,6 +299,8 @@ class Once:
         # from what ``key`` sees.
         if key is not None and not callable(key):
             raise TypeError(f"key must be a callable, not {type(key).__name__}")
+        if inspect.iscoroutinefunction(key):
+            raise TypeError("key must be a plain function, not async")
         skip = frozenset(exclude)
         seconds = _ttl(ttl)
 
@@ -350,6 +353,7 @@ class Once:
         name, verify and ttl are used unless given here. Use aexecute for async
         functions.
         """
+        _check_key(key)
         func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
@@ -373,6 +377,7 @@ class Once:
         ``fn`` may be async or plain; a plain function runs in a worker thread.
         ``verify`` may be async or plain.
         """
+        _check_key(key)
         func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
         call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
         is_async = inspect.iscoroutinefunction(func)
@@ -479,13 +484,15 @@ class Once:
         call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
         if key is None:
             key = explicit
-        if key is None and key_fn is not None:
+        if key_fn is not None:
             # The identity comes from key_fn, so only its value is hashed and
-            # the other arguments may differ (or not be JSON) on a replay.
+            # the other arguments may differ (or not be JSON) on a replay. A
+            # key from the caller still names the record.
             value = _identity(key_fn, call_args, tool_name)
-            if scope is None:
-                scope = _current_scope.get()
-            key = make_key(tool_name, {"key": value}, scope)
+            if key is None:
+                if scope is None:
+                    scope = _current_scope.get()
+                key = make_key(tool_name, {"key": value}, scope)
             h = args_hash({"tool": tool_name, "key": value})
         else:
             try:
@@ -1091,10 +1098,38 @@ def _statuses(
     return [Status(s) for s in status]
 
 
+def _check_key(key: object) -> None:
+    if callable(key):
+        raise TypeError(
+            "execute(key=...) takes the key itself; to compute it from the args,"
+            " use @once.tool(key=fn)"
+        )
+
+
+def _copy(value: Any, memo: dict[int, Any]) -> Any:
+    """Copy dicts, lists, tuples and sets all the way down; share anything else."""
+    if type(value) not in (dict, list, tuple, set):
+        return value
+    if id(value) in memo:
+        return memo[id(value)]
+    if type(value) is dict:
+        out: Any = memo.setdefault(id(value), {})
+        out.update((k, _copy(v, memo)) for k, v in value.items())
+        return out
+    if type(value) is list:
+        out = memo.setdefault(id(value), [])
+        out.extend(_copy(v, memo) for v in value)
+        return out
+    return type(value)(_copy(v, memo) for v in value)
+
+
 def _identity(key_fn: KeyFn, args: dict[str, Any], tool_name: str) -> Any:
-    """Run a tool's ``key`` callable and check what it returns."""
+    """Run a tool's ``key`` callable and check what it returns.
+
+    It gets a copy of the args, so changing them doesn't change the call.
+    """
     try:
-        value = key_fn(dict(args))
+        value = key_fn(_copy(args, {}))
     except Exception as exc:
         raise ValueError(f"key for {tool_name!r} raised {exc!r}") from exc
     if value is None or (isinstance(value, (str, list, tuple, dict)) and not value):

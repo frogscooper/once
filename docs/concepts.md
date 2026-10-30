@@ -130,7 +130,14 @@ refund("o1", 500, memo="damaged")  # runs
 refund("o1", 450, memo="damaged item")  # same order_id: returns the first result
 ```
 
-`key` gets a dict of the bound arguments, with defaults filled in and `idempotency_key` left out. It returns a string or any other JSON value. The key is then `make_key(tool_name, {"key": value}, scope)`, so two tools with the same order id don't collide, and the stored hash covers only that value, so different arguments replay instead of raising `KeyConflict`. A non-empty `idempotency_key` from the caller still wins. If `key` raises or returns `None` or an empty value, the call fails before anything is claimed. `key` and `exclude` can't be used together. The framework helpers take `key=` too.
+`key` gets a dict of the bound arguments, with defaults filled in and `idempotency_key` left out. It returns a string or any other JSON value. The key is then `make_key(tool_name, {"key": value}, scope)`, so two tools with the same order id don't collide, and the stored hash covers only that value, so different arguments replay instead of raising `KeyConflict`. A non-empty `idempotency_key` from the caller, or `execute(key=...)`, still picks the record, but the hash is still just the value. If `key` raises or returns `None` or an empty value, the call fails before anything is claimed. `key` and `exclude` can't be used together. The framework helpers take `key=` too.
+
+A few things to know:
+
+- `key` gets a copy of the arguments, so changing it doesn't change the call. It must be a plain function, not async.
+- The value follows the JSON rules below, so `123` and `"123"` are different keys. If a model might send an id as a number one time and a string the next, normalize it: `key=lambda a: str(a["order_id"])`.
+- `verify` gets the arguments of the call that is checking, which may not be the ones the first call ran with.
+- The tool name defaults to the function's `__name__`, so two lambdas, or methods with the same name on two classes, share keys. Give them `name=`.
 
 ## Gotchas
 
