@@ -31,6 +31,8 @@ R = TypeVar("R")
 KEY_PARAM = "idempotency_key"
 
 Verifier = Callable[[str, dict[str, Any]], Any]
+# Gets the bound arguments, returns the identity of the call.
+KeyFn = Callable[[dict[str, Any]], Any]
 """verify(key, args) returns the effect's result if it happened, or NOT_HAPPENED.
 
 For async tools it may also be an async function.
@@ -239,6 +241,7 @@ class Once:
         verify: Verifier | None = None,
         exclude: Collection[str] = (),
         ttl: TTL | None = None,
+        key: KeyFn | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
     def tool(
@@ -250,6 +253,7 @@ class Once:
         verify: Verifier | None = None,
         exclude: Collection[str] = (),
         ttl: TTL | None = None,
+        key: KeyFn | None = None,
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
@@ -266,7 +270,34 @@ class Once:
 
         ``ttl`` (seconds or a timedelta) makes a done result expire, after which
         the same call runs again. It overrides the Once default.
+
+        ``key`` picks the identity of a call instead of using all its
+        arguments. It gets a dict of the bound arguments (defaults filled in,
+        ``idempotency_key`` left out) and returns a str or other JSON value,
+        such as ``lambda a: a["order_id"]``. The key is then
+        make_key(name, {"key": value}, scope), and calls with the same value
+        replay the stored result even if other arguments differ. A non-empty
+        ``idempotency_key`` from the caller still wins. ``key`` can't be
+        combined with ``exclude``.
         """
+        if key is not None and exclude:
+            raise ValueError("pass key or exclude, not both: with key, exclude has no effect")
+        return self._decorator(name, timeout, verify, exclude, ttl, key, fn)
+
+    def _decorator(
+        self,
+        name: str | None,
+        timeout: float | None,
+        verify: Verifier | None,
+        exclude: Collection[str],
+        ttl: TTL | None,
+        key: KeyFn | None,
+        fn: Callable[..., Any] | None = None,
+    ) -> Any:
+        # Integrations call this directly: they exclude their context parameter
+        # from what ``key`` sees.
+        if key is not None and not callable(key):
+            raise TypeError(f"key must be a callable, not {type(key).__name__}")
         skip = frozenset(exclude)
         seconds = _ttl(ttl)
 
@@ -281,19 +312,19 @@ class Once:
 
                 @functools.wraps(func)
                 async def awrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                    call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
+                    call = self._prepare(func, tool_name, args, kwargs, None, None, skip, key)
                     return await self._arun(call, True, timeout, verify, self._pick(seconds))
 
-                awrapper.__once_tool__ = (func, tool_name, verify, skip, seconds)  # type: ignore[attr-defined]
+                awrapper.__once_tool__ = (func, tool_name, verify, skip, seconds, key)  # type: ignore[attr-defined]
                 return cast(Callable[P, R], awrapper)
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                call = self._prepare(func, tool_name, args, kwargs, None, None, skip)
+                call = self._prepare(func, tool_name, args, kwargs, None, None, skip, key)
                 result: R = self._run(call, timeout, verify, self._pick(seconds))
                 return result
 
-            wrapper.__once_tool__ = (func, tool_name, verify, skip, seconds)  # type: ignore[attr-defined]
+            wrapper.__once_tool__ = (func, tool_name, verify, skip, seconds, key)  # type: ignore[attr-defined]
             return wrapper
 
         if fn is not None:
@@ -319,10 +350,10 @@ class Once:
         name, verify and ttl are used unless given here. Use aexecute for async
         functions.
         """
-        func, name, verify, skip, seconds = self._unwrap(fn, tool_name, verify, ttl)
+        func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
-        call = self._prepare(func, name, (), kwargs, key, scope, skip)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
         return self._run(call, timeout, verify, seconds)
 
     async def aexecute(
@@ -342,8 +373,8 @@ class Once:
         ``fn`` may be async or plain; a plain function runs in a worker thread.
         ``verify`` may be async or plain.
         """
-        func, name, verify, skip, seconds = self._unwrap(fn, tool_name, verify, ttl)
-        call = self._prepare(func, name, (), kwargs, key, scope, skip)
+        func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
         is_async = inspect.iscoroutinefunction(func)
         return await self._arun(call, is_async, timeout, verify, seconds)
 
@@ -407,20 +438,23 @@ class Once:
         tool_name: str | None,
         verify: Verifier | None,
         ttl: TTL | None,
-    ) -> tuple[Callable[..., Any], str, Verifier | None, frozenset[str], float | None]:
+    ) -> tuple[
+        Callable[..., Any], str, Verifier | None, frozenset[str], float | None, KeyFn | None
+    ]:
         func: Callable[..., Any] = fn
+        key_fn: KeyFn | None = None
         name = tool_name
         seconds = _ttl(ttl)
         marker = getattr(fn, "__once_tool__", None)
         if marker is not None:
-            func, default_name, default_verify, skip, default_ttl = marker
+            func, default_name, default_verify, skip, default_ttl, key_fn = marker
             name = name or default_name
             verify = verify or default_verify
             seconds = default_ttl if seconds is None else seconds
         else:
             skip = frozenset()
         name = str(name or getattr(func, "__name__", "tool"))
-        return func, name, verify, skip, self._pick(seconds)
+        return func, name, verify, skip, self._pick(seconds), key_fn
 
     def _pick(self, ttl: float | None) -> float | None:
         return self.ttl if ttl is None else ttl
@@ -434,6 +468,7 @@ class Once:
         key: str | None,
         scope: str | None,
         exclude: frozenset[str] = frozenset(),
+        key_fn: KeyFn | None = None,
     ) -> _Call:
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
@@ -442,22 +477,30 @@ class Once:
         if explicit == "":  # often a default; same as None, so compute the key
             explicit = None
         call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
-        try:
-            canonical_json(call_args)
-        except (TypeError, ValueError) as exc:
-            bad = next((name for name, v in call_args.items() if not _is_json(v)), None)
-            what = "arguments" if bad is None else f"argument {bad!r}"
-            raise TypeError(f"{what} to {tool_name!r} must be JSON serializable") from exc
-
         if key is None:
             key = explicit
-        if key is None:
+        if key is None and key_fn is not None:
+            # The identity comes from key_fn, so only its value is hashed and
+            # the other arguments may differ (or not be JSON) on a replay.
+            value = _identity(key_fn, call_args, tool_name)
             if scope is None:
                 scope = _current_scope.get()
-            key = make_key(tool_name, call_args, scope)
+            key = make_key(tool_name, {"key": value}, scope)
+            h = args_hash({"tool": tool_name, "key": value})
+        else:
+            try:
+                canonical_json(call_args)
+            except (TypeError, ValueError) as exc:
+                bad = next((name for name, v in call_args.items() if not _is_json(v)), None)
+                what = "arguments" if bad is None else f"argument {bad!r}"
+                raise TypeError(f"{what} to {tool_name!r} must be JSON serializable") from exc
+            if key is None:
+                if scope is None:
+                    scope = _current_scope.get()
+                key = make_key(tool_name, call_args, scope)
+            h = args_hash({"tool": tool_name, "args": call_args})
         if KEY_PARAM in sig.parameters:
             bound.arguments[KEY_PARAM] = key
-        h = args_hash({"tool": tool_name, "args": call_args})
 
         def invoke() -> Any:
             return func(*bound.args, **bound.kwargs)
@@ -1046,6 +1089,19 @@ def _statuses(
     if isinstance(status, str):  # Status is a str too
         return [Status(status)]
     return [Status(s) for s in status]
+
+
+def _identity(key_fn: KeyFn, args: dict[str, Any], tool_name: str) -> Any:
+    """Run a tool's ``key`` callable and check what it returns."""
+    try:
+        value = key_fn(dict(args))
+    except Exception as exc:
+        raise ValueError(f"key for {tool_name!r} raised {exc!r}") from exc
+    if value is None or (isinstance(value, (str, list, tuple, dict)) and not value):
+        raise ValueError(f"key for {tool_name!r} returned {value!r}, need a non-empty value")
+    if not _is_json(value):
+        raise TypeError(f"key for {tool_name!r} returned {type(value).__name__}, need JSON")
+    return value
 
 
 def _is_json(value: Any) -> bool:

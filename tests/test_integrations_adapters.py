@@ -273,3 +273,59 @@ def test_ttl_timedelta_and_no_ttl(once: Once) -> None:
     forever_record = once.get(make_key("forever", {"n": 1}, None))
     assert kept_record is not None and kept_record.expires_at is not None
     assert forever_record is not None and forever_record.expires_at is None
+
+
+def test_key_reaches_every_adapter(once: Once) -> None:
+    calls: dict[str, int] = dict.fromkeys(ADAPTERS, 0)
+    seen: dict[str, dict[str, Any]] = {}
+    tools: dict[str, Callable[..., int]] = {}
+    for label, adapter in ADAPTERS.items():
+
+        def pick(args: dict[str, Any], label: str = label) -> str:
+            seen[label] = args
+            return str(args["order_id"])
+
+        def run(order_id: str, amount: int, label: str = label) -> int:
+            calls[label] += 1
+            return amount
+
+        tools[label] = adapter(once, name=label, key=pick)(run)
+
+    for label, tool in tools.items():
+        assert tool("o1", 5) == 5
+        assert tool("o1", 4) == 5  # same order, re-planned amount: replayed
+        assert tool("o2", 4) == 4
+        assert calls[label] == 2
+        assert once.get(make_key(label, {"key": "o1"}, None)) is not None
+
+
+def test_key_does_not_see_the_context(once: Once) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def pick(args: dict[str, Any]) -> str:
+        seen.append(args)
+        return str(args["order_id"])
+
+    @oa_tool(once, name="refund", key=pick)
+    async def refund(ctx: ToolContext, order_id: str, amount: int) -> int:
+        return amount
+
+    @pa_tool(once, name="refund", key=pick)
+    async def refund2(ctx: RunContext, order_id: str, amount: int) -> int:
+        return amount
+
+    class RefundTool:
+        @crew_tool(once, name="refund3", key=pick)
+        def _run(self, order_id: str, amount: int) -> int:
+            return amount
+
+    async def main() -> list[int]:
+        return [
+            await refund(ToolContext("g1"), "o1", 5),
+            await refund(ToolContext("g1"), "o1", 6),
+            await refund2(RunContext("c1"), "o1", 7),
+        ]
+
+    assert asyncio.run(main()) == [5, 5, 7]
+    assert RefundTool()._run("o1", 8) == 8
+    assert all(set(args) == {"order_id", "amount"} for args in seen)
