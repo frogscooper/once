@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `key=` on `@once.tool` and the framework helpers. It gets the bound arguments as a dict and returns the identity of the call, e.g. `@once.tool(key=lambda a: a["order_id"])`. A replay with the same value returns the stored result even if other arguments changed. A caller's `idempotency_key` still wins. `key` with `exclude` raises `ValueError`, and a `key` that raises or returns `None` or an empty value fails before claiming.
+- `key=` on `@once.tool` and the framework helpers. It gets the bound arguments as a dict and returns the identity of the call, e.g. `@once.tool(key=lambda a: a["order_id"])`. A replay with the same value returns the stored result even if other arguments changed. A caller's `idempotency_key` still wins. `key` with `exclude` raises `ValueError`, and a `key` that raises or returns `None` or an empty value fails before claiming. A caller's key still checks only the `key` value, so a replay with other args returns the stored result. `key` gets a deep copy of the args, an async `key` raises `TypeError`, and so does passing a function to `execute(key=...)`.
 
 ## 0.1.0 (2026-10-26)
 

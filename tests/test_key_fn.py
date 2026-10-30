@@ -106,9 +106,10 @@ def test_idempotency_key_from_caller_wins(once: Once) -> None:
     # Without it, key= picks a different key, so this runs.
     assert refund("o1", 5) == 2
     assert calls == ["caller-1", make_key("refund", {"key": "o1"}, None)]
-    # An explicit key still checks the args, as before.
+    # With key=, the caller's key also checks only the value.
+    assert refund("o1", 6, idempotency_key="caller-1") == 1
     with pytest.raises(KeyConflict):
-        refund("o1", 6, idempotency_key="caller-1")
+        refund("o2", 5, idempotency_key="caller-1")
 
 
 def test_execute_uses_key_fn_unless_given_a_key(once: Once) -> None:
@@ -208,4 +209,76 @@ def test_async_key_fn_error_before_claim(once: Once) -> None:
 
     with pytest.raises(ValueError, match="non-empty"):
         asyncio.run(refund("o1"))
+    assert once.records() == []
+
+
+def test_caller_key_with_args_that_are_not_json(once: Once) -> None:
+    class Payments:
+        @once.tool(key=lambda a: a["order_id"])
+        def refund(self, order_id: str, amount: int, idempotency_key: str = "") -> int:
+            return amount
+
+    payments = Payments()
+    assert payments.refund("o1", 5, idempotency_key="caller-1") == 5
+    assert payments.refund("o1", 6, idempotency_key="caller-1") == 5
+
+
+def test_key_fn_changes_do_not_reach_the_call(once: Once) -> None:
+    def pick(args: dict[str, Any]) -> str:
+        args["order_id"] = "changed"
+        args["items"].append("added")
+        args["meta"]["note"] = "added"
+        args["items"].sort()
+        return "k"
+
+    @once.tool(key=pick)
+    def refund(order_id: str, items: list[str], meta: dict[str, Any]) -> list[Any]:
+        return [order_id, items, meta]
+
+    items, meta = ["b", "a"], {"x": [1]}
+    assert refund("o1", items, meta) == ["o1", ["b", "a"], {"x": [1]}]
+    assert items == ["b", "a"] and meta == {"x": [1]}
+
+
+def test_key_fn_copy_handles_cycles_and_objects(once: Once) -> None:
+    seen: list[Any] = []
+    loop: list[Any] = [1]
+    loop.append(loop)
+    marker = object()
+
+    def pick(args: dict[str, Any]) -> str:
+        seen.append(args)
+        return "k"
+
+    @once.tool(key=pick)
+    def refund(loop: list[Any], obj: object) -> int:
+        return 1
+
+    refund(loop, marker)
+    copied = seen[0]["loop"]
+    assert copied is not loop and copied[1] is copied
+    assert seen[0]["obj"] is marker
+
+
+def test_async_key_fn_is_rejected(once: Once) -> None:
+    async def pick(args: dict[str, Any]) -> str:
+        return "k"
+
+    with pytest.raises(TypeError, match="not async"):
+        once.tool(key=pick)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_execute_with_a_function_as_key(once: Once, asynchronous: bool) -> None:
+    def refund(order_id: str) -> str:
+        return order_id
+
+    def pick(args: dict[str, Any]) -> str:
+        return str(args["order_id"])
+
+    with pytest.raises(TypeError, match=r"once\.tool"):
+        if asynchronous:
+            asyncio.run(once.aexecute(refund, key=pick, order_id="o1"))  # type: ignore[arg-type]
+        else:
+            once.execute(refund, key=pick, order_id="o1")  # type: ignore[arg-type]
     assert once.records() == []
