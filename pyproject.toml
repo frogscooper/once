@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-once"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run side-effecting agent tool calls at most once per idempotency key."
 readme = "README.md"
 license = "MIT"
