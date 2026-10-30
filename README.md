@@ -82,6 +82,21 @@ If the function has an `idempotency_key` parameter, `once` passes the key in, so
 
 Each record also stores a hash of the tool name and arguments. Reusing a key with different arguments raises `KeyConflict`.
 
+### Picking the identity with `key=`
+
+By default every argument is part of the key. If a retry or replay re-plans the call with slightly different arguments (a new memo, a rounded amount), the key changes and the side effect runs again. Pass `key=` to say what makes two calls the same:
+
+```python
+@once.tool(key=lambda a: a["order_id"])
+def refund(order_id: str, amount: int, memo: str = "") -> str:
+    return stripe.Refund.create(...).id
+
+refund("o1", 500, memo="damaged")       # runs
+refund("o1", 450, memo="damaged item")  # same order_id: returns the first result
+```
+
+`key` gets a dict of the bound arguments, with defaults filled in and `idempotency_key` left out. It returns a string or any other JSON value. The key is then `make_key(tool_name, {"key": value}, scope)`, so two tools with the same order id don't collide, and the stored hash covers only that value, so different arguments replay instead of raising `KeyConflict`. A non-empty `idempotency_key` from the caller still wins. If `key` raises or returns `None` or an empty value, the call fails before anything is claimed. `key` and `exclude` can't be used together. The framework helpers take `key=` too.
+
 ## States
 
 | status    | meaning                                  | on replay              |
@@ -250,7 +265,7 @@ def refund_order(order_id: str, amount: int) -> str:
     """Refund an order."""
 ```
 
-Runnable versions are in `examples/`, and none of them need an API key. The `openai-agents`, `pydantic-ai` and `crewai` extras install the framework. `crewai` and `openai-agents` can't be installed in the same environment: crewai pins `openai<3` and openai-agents needs `openai>=3`. Every helper also takes `ttl=`, passed through to `@once.tool`. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
+Runnable versions are in `examples/`, and none of them need an API key. The `openai-agents`, `pydantic-ai` and `crewai` extras install the framework. `crewai` and `openai-agents` can't be installed in the same environment: crewai pins `openai<3` and openai-agents needs `openai>=3`. Every helper also takes `ttl=` and `key=`, passed through to `@once.tool`; `key` doesn't get the framework's context parameter. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
 
 ## Expiry
 

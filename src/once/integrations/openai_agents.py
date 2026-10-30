@@ -23,7 +23,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar, overload
 
-from ..core import TTL, Once, Verifier
+from ..core import TTL, KeyFn, Once, Verifier
 from ._wrap import find_param, wrap
 
 P = ParamSpec("P")
@@ -54,6 +54,7 @@ def once_tool(
     name: str | None = None,
     timeout: float | None = None,
     ttl: TTL | None = None,
+    key: KeyFn | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
     scope_from: ScopeFrom | None = None,
@@ -69,6 +70,7 @@ def once_tool(
     name: str | None = None,
     timeout: float | None = None,
     ttl: TTL | None = None,
+    key: KeyFn | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
     scope_from: ScopeFrom | None = None,
@@ -83,6 +85,8 @@ def once_tool(
     context_arg: the context parameter, if it is not annotated as
         RunContextWrapper or ToolContext or named ``ctx``, ``context`` or
         ``wrapper``.
+    key: picks the identity of a call, as in ``once.tool``. It doesn't get
+        the context parameter.
     """
 
     def decorate(func: Callable[P, R]) -> Callable[P, R]:
@@ -108,6 +112,7 @@ def once_tool(
             name=name,
             timeout=timeout,
             ttl=ttl,
+            key=key,
             verify=verify,
             exclude=exclude,
             scope_of=scope_of,

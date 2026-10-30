@@ -116,6 +116,21 @@ If the function has an `idempotency_key` parameter:
 
 Each record also stores a hash of the tool name and arguments. Reusing a key with different arguments raises `KeyConflict`, unless the old record has [expired](ttl.md).
 
+## Picking the identity with `key=`
+
+By default every argument is part of the key. If a retry or replay re-plans the call with slightly different arguments (a new memo, a rounded amount), the key changes and the side effect runs again. Pass `key=` to say what makes two calls the same:
+
+```python
+@once.tool(key=lambda a: a["order_id"])
+def refund(order_id: str, amount: int, memo: str = "") -> str:
+    return stripe.Refund.create(...).id
+
+refund("o1", 500, memo="damaged")       # runs
+refund("o1", 450, memo="damaged item")  # same order_id: returns the first result
+```
+
+`key` gets a dict of the bound arguments, with defaults filled in and `idempotency_key` left out. It returns a string or any other JSON value. The key is then `make_key(tool_name, {"key": value}, scope)`, so two tools with the same order id don't collide, and the stored hash covers only that value, so different arguments replay instead of raising `KeyConflict`. A non-empty `idempotency_key` from the caller still wins. If `key` raises or returns `None` or an empty value, the call fails before anything is claimed. `key` and `exclude` can't be used together. The framework helpers take `key=` too.
+
 ## Gotchas
 
 - **Keys follow the JSON.** `10` and `10.0` give different keys. A tuple and a list with the same items give the same key, and so do `{1: "a"}` and `{"1": "a"}`, since JSON object keys are strings; a dict that mixes key types can't be serialized at all. Adding a parameter with a default changes every key for that tool, because defaults are part of the key, so old records stop matching. Leave the new parameter out with `exclude=`, or pass `key=` yourself.
