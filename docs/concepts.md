@@ -125,7 +125,8 @@ By default every argument is part of the key. If a retry or replay re-plans the 
 def refund(order_id: str, amount: int, memo: str = "") -> str:
     return stripe.Refund.create(...).id
 
-refund("o1", 500, memo="damaged")       # runs
+
+refund("o1", 500, memo="damaged")  # runs
 refund("o1", 450, memo="damaged item")  # same order_id: returns the first result
 ```
 
