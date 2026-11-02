@@ -17,6 +17,7 @@ except ImportError as exc:  # pragma: no cover - depends on what is installed
 
 from .store import (
     _COLUMNS,
+    ADDED_COLUMNS,
     Record,
     Status,
     _cutoff,
@@ -41,7 +42,8 @@ CREATE TABLE IF NOT EXISTS {table} (
     args_hash TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT
+    expires_at TEXT,
+    args TEXT
 )
 """
 
@@ -139,23 +141,31 @@ class PostgresStore:
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"once:{self.table}",))
                 if create:
                     conn.execute(self._q(_SCHEMA))
-                # Tables made before ttl support have no expires_at column or
-                # index. Only change what is missing, since that needs table
-                # ownership.
+                # Older tables lack the columns in ADDED_COLUMNS and the
+                # expires_at index. Only change what is missing, since that
+                # needs table ownership.
                 name = self._ident.as_string(conn)
                 row = conn.execute(
-                    "SELECT to_regclass(%s) IS NOT NULL, EXISTS (SELECT 1 FROM pg_attribute "
-                    "WHERE attrelid = to_regclass(%s) AND attname = 'expires_at' "
-                    "AND NOT attisdropped), to_regclass(%s) IS NOT NULL",
-                    (name, name, self._index_name.as_string(conn)),
+                    "SELECT to_regclass(%s) IS NOT NULL, to_regclass(%s) IS NOT NULL, "
+                    "ARRAY(SELECT attname::text FROM pg_attribute "
+                    "WHERE attrelid = to_regclass(%s) AND NOT attisdropped)",
+                    (name, self._index_name.as_string(conn), name),
                 ).fetchone()
                 if row is None or not row[0]:
                     return
+                have = set(row[2])
+                for column, kind in ADDED_COLUMNS:
+                    if column not in have:
+                        conn.execute(
+                            sql.SQL(
+                                "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}"
+                            ).format(
+                                table=self._ident,
+                                column=sql.Identifier(column),
+                                kind=sql.SQL(kind),
+                            )
+                        )
                 if not row[1]:
-                    conn.execute(
-                        self._q("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expires_at TEXT")
-                    )
-                if not row[2]:
                     # Partial, so it only holds records with a ttl.
                     conn.execute(
                         sql.SQL(
@@ -179,13 +189,13 @@ class PostgresStore:
                 self._conn_obj.close()
                 self._conn_obj = None
 
-    def claim(self, key: str, args_hash: str | None) -> str | None:
+    def claim(self, key: str, args_hash: str | None, args: str | None = None) -> str | None:
         """Insert a pending record. Returns an owner token, or None if the key exists."""
         now = _now()
         cur = self._execute(
-            "INSERT INTO {table} (key, status, args_hash, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
-            (key, Status.PENDING.value, args_hash, now, now),
+            "INSERT INTO {table} (key, status, args_hash, created_at, updated_at, args) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
+            (key, Status.PENDING.value, args_hash, now, now, args),
         )
         return now if cur.rowcount == 1 else None
 
@@ -242,7 +252,7 @@ class PostgresStore:
         )
         return now if cur.rowcount == 1 else None
 
-    def renew(self, record: Record, args_hash: str | None) -> str | None:
+    def renew(self, record: Record, args_hash: str | None, args: str | None = None) -> str | None:
         """Turn an expired record back into a fresh pending one, if it is unchanged.
 
         Returns an owner token, or None if someone else changed it first.
@@ -250,11 +260,12 @@ class PostgresStore:
         now = _next_token(record.updated_at)
         cur = self._execute(
             "UPDATE {table} SET status = %s, result = NULL, error = NULL, args_hash = %s, "
-            "created_at = %s, updated_at = %s, expires_at = NULL "
+            "args = %s, created_at = %s, updated_at = %s, expires_at = NULL "
             "WHERE key = %s AND status = %s AND updated_at = %s",
             (
                 Status.PENDING.value,
                 args_hash,
+                args,
                 now,
                 now,
                 record.key,

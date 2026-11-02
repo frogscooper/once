@@ -25,6 +25,7 @@ from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar, overload
 
 from ..core import TTL, KeyFn, Once, Verifier
+from ..intent import Intent
 from ._wrap import wrap
 
 P = ParamSpec("P")
@@ -44,6 +45,7 @@ def once_tool(
     timeout: float | None = None,
     ttl: TTL | None = None,
     key: KeyFn | None = None,
+    intent: Intent | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
@@ -58,6 +60,7 @@ def once_tool(
     timeout: float | None = None,
     ttl: TTL | None = None,
     key: KeyFn | None = None,
+    intent: Intent | None = None,
     verify: Verifier | None = None,
     scope_arg: str | None = None,
 ) -> Any:
@@ -67,6 +70,8 @@ def once_tool(
         the model passes in). It stays part of the key too.
     key: picks the identity of a call, as in ``once.tool``. It doesn't get
         ``self``.
+    intent: what makes two calls the same act, as in ``once.tool``. Its
+        fields can't name the excluded parameter.
     """
 
     def decorate(func: Callable[P, R]) -> Callable[P, R]:
@@ -85,6 +90,7 @@ def once_tool(
             timeout=timeout,
             ttl=ttl,
             key=key,
+            intent=intent,
             verify=verify,
             exclude=exclude,
             scope_of=scope_of,

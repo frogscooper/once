@@ -15,12 +15,20 @@ class OnceError(Exception):
 class KeyConflict(OnceError):
     """The key was already used with different arguments."""
 
-    def __init__(self, key: str, stored_hash: str | None, new_hash: str) -> None:
-        super().__init__(
-            f"key {key!r} was already used with different arguments "
-            f"(stored args_hash {stored_hash}, got {new_hash})"
-        )
+    def __init__(
+        self, key: str, stored_hash: str | None, new_hash: str, detail: str | None = None
+    ) -> None:
+        if detail is None:
+            message = (
+                f"key {key!r} was already used with different arguments "
+                f"(stored args_hash {stored_hash}, got {new_hash})"
+            )
+        else:
+            message = f"key {key!r} was already used with different arguments: {detail}"
+        super().__init__(message)
         self.key = key
+        self.detail = detail
+        """For a tool with an intent, which fields didn't match and how."""
 
 
 class EffectError(OnceError):

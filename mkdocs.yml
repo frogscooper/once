@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - Quickstart: quickstart.md
   - Concepts: concepts.md
+  - Intents: intents.md
   - Expiry and gc: ttl.md
   - Backends: backends.md
   - Verifiers: verifiers.md

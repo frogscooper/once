@@ -140,6 +140,7 @@ def _data(record: Record) -> dict[str, object]:
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         "expires_at": record.expires_at,
+        "args": json.loads(record.args) if record.args is not None else None,
     }
 
 

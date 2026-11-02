@@ -105,6 +105,32 @@ A few things to know:
 - `verify` gets the arguments of the call that is checking, which may not be the ones the first call ran with.
 - The tool name defaults to the function's `__name__`, so two lambdas, or methods with the same name on two classes, share keys. Give them `name=`.
 
+### Intents: what counts as the same act
+
+`key=` ignores every other argument. An intent keeps checking them, with a tolerance per field:
+
+```python
+from once import ignore, intent, within
+
+REFUND = intent(
+    "refund",
+    id={"order_id": str},  # picks the record; str makes 123 and "123" the same
+    match={"amount": within(pct=1), "memo": ignore},  # other fields must be equal
+)
+
+
+@once.tool(intent=REFUND)
+def refund(order_id: str, amount: int, currency: str = "usd", memo: str = "") -> str:
+    return stripe.Refund.create(...).id
+
+
+refund("o1", 500, memo="damaged")  # runs
+refund("o1", 499, memo="damaged item")  # within 1%: returns the first result
+refund("o1", 450)  # KeyConflict: amount: stored 500, got 450 (within(pct=1))
+```
+
+The key comes from the intent's name and version (`refund@1`), not the function's name. The first call's compared arguments are stored with the record, and every replay is compared with them, so tolerances never add up. Matchers are `exact` (the default for unnamed fields), `ignore`, `within(abs=..., pct=...)`, `equal_after(fn)` or any `(stored, new) -> bool` function. See [Intents](https://frogscooper.dev/once/intents/).
+
 ## States
 
 | status    | meaning                                  | on replay              |

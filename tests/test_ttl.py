@@ -333,7 +333,7 @@ def test_sqlite_migration(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     columns = [row[1] for row in conn.execute("PRAGMA table_info(effects)")]
     conn.close()
-    assert columns[-1] == "expires_at"
+    assert columns[-2:] == ["expires_at", "args"]
     assert "effects_expires_at" in sqlite_indexes(path)
 
 
@@ -355,7 +355,7 @@ def test_postgres_migration(pg_schema: str) -> None:
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'once_effects' AND table_schema = current_schema()"
         )
-        assert "expires_at" in {row[0] for row in cur.fetchall()}
+        assert {"expires_at", "args"} <= {row[0] for row in cur.fetchall()}
     assert "once_effects_expires_at" in pg_indexes(pg_schema, "once_effects")
 
 
