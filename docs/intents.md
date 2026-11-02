@@ -14,10 +14,10 @@ once = Once()
 
 REFUND = intent(
     "refund",
-    id={"order_id": str},              # identity, with a normalizer
+    id={"order_id": str},  # identity, with a normalizer
     match={
-        "amount": within(pct=1),       # 500 then 499: same act
-        "memo": ignore,                # any memo, not stored
+        "amount": within(pct=1),  # 500 then 499: same act
+        "memo": ignore,  # any memo, not stored
     },
 )
 
@@ -27,10 +27,10 @@ def refund(order_id: str, amount: int, currency: str = "usd", memo: str = "") ->
     return stripe.Refund.create(...).id
 
 
-refund("o1", 500, memo="damaged")      # runs
+refund("o1", 500, memo="damaged")  # runs
 refund("o1", 499, memo="damaged item")  # replays the first result
-refund("o1", 450)                       # KeyConflict: amount: stored 500, got 450 (within(pct=1))
-refund("o1", 500, currency="eur")       # KeyConflict: currency: stored 'usd', got 'eur' (exact)
+refund("o1", 450)  # KeyConflict: amount: stored 500, got 450 (within(pct=1))
+refund("o1", 500, currency="eur")  # KeyConflict: currency: stored 'usd', got 'eur' (exact)
 ```
 
 ## Identity
@@ -66,8 +66,7 @@ When a ttl runs out, the next call runs again and its arguments become the new f
 A verify function with a parameter named `stored` gets the first call's compared arguments, as well as the current call's arguments in `args`:
 
 ```python
-def find_refund(key: str, args: dict, stored: dict | None) -> object:
-    ...
+def find_refund(key: str, args: dict, stored: dict | None) -> object: ...
 ```
 
 Verifiers without a `stored` parameter are called as before.
