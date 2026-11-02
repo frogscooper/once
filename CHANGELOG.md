@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- A `timeout` of zero, a negative number or NaN raises `ValueError` before anything runs. It used to start the call and give up on it at once, so the effect happened and the record said unknown. `math.inf` means no timeout.
+- `execute(key=...)` and a caller's `idempotency_key` must be a `str`; `execute(key="")` raises `ValueError`. A number used to be stored as text in SQLite and fail in Postgres.
+- `Once.purge(older_than=...)` rejects a negative age, which would have deleted every matching record.
+- A warning is logged on the `once` logger when a call's outcome can't be stored because its record was reset, purged or taken over while it ran.
+- `once reset` refuses a pending record, whose call may still be running, unless you pass `--force`.
+- `once ls` escapes tabs and line breaks in errors so each record stays on one line, and `once ls --json` prints one JSON object per record.
+
 ## 0.2.0 (2026-10-30)
 
 - `key=` on `@once.tool` and the framework helpers. It gets a deep copy of the bound arguments as a dict and returns the identity of the call, e.g. `@once.tool(key=lambda a: a["order_id"])`. A replay with the same value returns the stored result even if other arguments changed. This also applies when the caller passes an `idempotency_key`: the record is named by that key, but only the `key` value is checked for conflicts.

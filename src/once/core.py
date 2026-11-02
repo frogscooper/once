@@ -134,6 +134,17 @@ def _ttl(ttl: TTL | None) -> float | None:
     return seconds
 
 
+def _timeout(timeout: float | None) -> float | None:
+    """Check a timeout. A zero or negative one would start the call and give up
+    on it at once, marking an effect that is about to happen as unknown."""
+    if timeout is None:
+        return None
+    seconds = float(timeout)
+    if math.isnan(seconds) or seconds <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout!r}")
+    return None if math.isinf(seconds) else seconds
+
+
 def _expiry(ttl: float | None) -> str | None:
     return None if ttl is None or math.isinf(ttl) else expiry(ttl)
 
@@ -303,6 +314,7 @@ class Once:
             raise TypeError("key must be a plain function, not async")
         skip = frozenset(exclude)
         seconds = _ttl(ttl)
+        timeout = _timeout(timeout)
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
             tool_name = name or func.__name__
@@ -354,6 +366,7 @@ class Once:
         functions.
         """
         _check_key(key)
+        timeout = _timeout(timeout)
         func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
@@ -378,6 +391,7 @@ class Once:
         ``verify`` may be async or plain.
         """
         _check_key(key)
+        timeout = _timeout(timeout)
         func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
         call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
         is_async = inspect.iscoroutinefunction(func)
@@ -420,6 +434,8 @@ class Once:
         """
         if older_than is None and not expired:
             raise TypeError("pass older_than, expired=True, or both")
+        if older_than is not None and not older_than >= 0:
+            raise ValueError(f"older_than must be 0 or more, got {older_than!r}")
         count = self.store.purge_expired() if expired else 0
         if older_than is not None:
             statuses = _statuses(status)
@@ -481,6 +497,10 @@ class Once:
         explicit = bound.arguments.pop(KEY_PARAM, None)
         if explicit == "":  # often a default; same as None, so compute the key
             explicit = None
+        if explicit is not None and not isinstance(explicit, str):
+            raise TypeError(
+                f"{KEY_PARAM} for {tool_name!r} must be a str, not {type(explicit).__name__}"
+            )
         call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
         if key is None:
             key = explicit
@@ -589,10 +609,19 @@ class Once:
         write that did land changes nothing.
         """
         try:
-            self.store.finish(key, token, status, result, error, expires_at)
+            stored = self.store.finish(key, token, status, result, error, expires_at)
         except Exception:
             logger.warning("once: storing the outcome of %s failed, retrying", key, exc_info=True)
             self.store.finish(key, token, status, result, error, expires_at)
+            return
+        if not stored:
+            # Reset, purged, or taken over by verify after stale_after while
+            # this call ran. Its outcome is returned to the caller but not kept.
+            logger.warning(
+                "once: %s outcome of %s was not stored: the record changed while the call ran",
+                status.value,
+                key,
+            )
 
     def _give_back(self, key: str, token: str) -> None:
         """Undo a claim whose call never started, so the next caller runs it.
@@ -1104,6 +1133,10 @@ def _check_key(key: object) -> None:
             "execute(key=...) takes the key itself; to compute it from the args,"
             " use @once.tool(key=fn)"
         )
+    if key is not None and not isinstance(key, str):
+        raise TypeError(f"key must be a str, not {type(key).__name__}")
+    if key == "":
+        raise ValueError("key must not be empty; pass None to compute one")
 
 
 def _copy(value: Any, memo: dict[int, Any]) -> Any:

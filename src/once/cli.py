@@ -15,6 +15,7 @@ from .store import Record, SQLiteStore, Status, Store, is_postgres_dsn
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 _STATUSES = [s.value for s in Status]
+_ESCAPES = str.maketrans({"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"})
 
 
 class _UsageError(Exception):
@@ -57,12 +58,16 @@ def _parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("ls", parents=[common], help="list records")
     ls.add_argument("--status", action="append", choices=_STATUSES, help="filter, repeatable")
     ls.add_argument("--limit", type=_count, default=None)
+    ls.add_argument("--json", action="store_true", help="one JSON object per line")
 
     show = sub.add_parser("show", parents=[common], help="show one record")
     show.add_argument("key", help="key or a unique prefix of it")
 
     reset = sub.add_parser("reset", parents=[common], help="delete a record so it can run again")
     reset.add_argument("key", help="key or a unique prefix of it")
+    reset.add_argument(
+        "--force", action="store_true", help="also delete a pending record (a call may be running)"
+    )
 
     gc = sub.add_parser("gc", parents=[common], help="delete old records")
     gc.add_argument("--older-than", type=parse_age, metavar="AGE")
@@ -119,9 +124,14 @@ def _resolve(store: Store, key: str) -> str:
     return matches[0]
 
 
-def _show(record: Record) -> str:
+def _cell(text: str) -> str:
+    """One tab separated field: escape tabs and line breaks so a row stays one line."""
+    return text.translate(_ESCAPES)
+
+
+def _data(record: Record) -> dict[str, object]:
     result = json.loads(record.result) if record.result is not None else None
-    data = {
+    return {
         "key": record.key,
         "status": record.status.value,
         "result": result,
@@ -131,7 +141,10 @@ def _show(record: Record) -> str:
         "updated_at": record.updated_at,
         "expires_at": record.expires_at,
     }
-    return json.dumps(data, indent=2)
+
+
+def _show(record: Record) -> str:
+    return json.dumps(_data(record), indent=2)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -148,13 +161,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "ls":
             statuses = [Status(s) for s in args.status] if args.status else None
             for r in store.records(statuses, args.limit):
-                print("\t".join([r.key, r.status.value, r.updated_at, r.error or ""]))
+                if args.json:
+                    print(json.dumps(_data(r)))
+                else:
+                    print("\t".join([r.key, r.status.value, r.updated_at, _cell(r.error or "")]))
         elif args.command == "show":
             record = store.get(_resolve(store, args.key))
             assert record is not None
             print(_show(record))
         elif args.command == "reset":
             key = _resolve(store, args.key)
+            record = store.get(key)
+            if record is not None and record.status is Status.PENDING and not args.force:
+                raise _UsageError(
+                    f"{key} is pending, so its call may still be running and resetting it"
+                    " could run the effect twice; use --force if you know it is not running"
+                )
             store.delete(key)
             print(f"deleted {key}")
         else:

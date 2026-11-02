@@ -6,8 +6,10 @@ Installing the package adds a `once` command (`python -m once` works too) for lo
 once ls                          # most recent first: key, status, updated_at, error
 once ls --status unknown         # repeat --status to show several
 once ls --limit 20
+once ls --json                   # one JSON object per line, with results
 once show 3f9a                   # one record as JSON; a unique key prefix is enough
 once reset 3f9a                  # delete it so the next call runs again
+once reset --force 3f9a          # also for a pending record
 once gc --expired                # delete done records whose ttl has passed
 once gc --older-than 7d          # delete done records not updated for 7 days
 once gc --older-than 30d --status failed --status done
@@ -32,5 +34,9 @@ The CLI never creates anything. A missing SQLite file or Postgres table is an er
 - `--expired` deletes done records past their ttl. See [Expiry and gc](ttl.md).
 
 Deleting pending or unknown records lets those calls run again, so pick statuses on purpose.
+
+`reset` refuses a pending record, since its call may still be running and deleting it could let the effect run twice. Pass `--force` once you know it isn't running.
+
+In `ls` output, tabs, line breaks and backslashes in errors are escaped (`\t`, `\n`, `\\`) so each record is one line.
 
 `show` and `reset` match a unique key prefix, and fail if the prefix matches no key or more than one.
