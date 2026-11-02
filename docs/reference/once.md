@@ -14,6 +14,22 @@ The main API, all importable from `once`.
 
 ::: once.canonical_json
 
+## Intents
+
+::: once.intent
+
+::: once.Intent
+
+::: once.Matcher
+
+::: once.exact
+
+::: once.ignore
+
+::: once.within
+
+::: once.equal_after
+
 ## Hooks
 
 ::: once.Hooks

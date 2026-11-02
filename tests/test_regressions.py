@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from datetime import timedelta
@@ -323,3 +324,98 @@ def test_unknown_after_a_concurrent_reset_still_raises_effect_unknown(db: str | 
 
     asyncio.run(main_())
     once.close()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan")])
+def test_a_timeout_that_is_not_positive_raises_before_running(
+    tmp_path: Path, timeout: float
+) -> None:
+    # It used to start the call and give up on it at once, so the effect ran
+    # and the record said unknown.
+    once = Once(tmp_path / "t.db")
+    ran: list[int] = []
+
+    def charge() -> None:
+        ran.append(1)
+
+    with pytest.raises(ValueError, match="timeout"):
+        once.execute(charge, key="k", timeout=timeout)
+    with pytest.raises(ValueError, match="timeout"):
+        asyncio.run(once.aexecute(charge, key="k", timeout=timeout))
+    with pytest.raises(ValueError, match="timeout"):
+        once.tool(timeout=timeout)(charge)
+    assert ran == [] and once.get("k") is None
+    assert once.execute(charge, key="k", timeout=float("inf")) is None
+    assert ran == [1]
+    once.close()
+
+
+def test_a_key_that_is_not_a_str_raises(tmp_path: Path) -> None:
+    once = Once(tmp_path / "k.db")
+
+    def send(idempotency_key: Any = None) -> str:
+        return "sent"
+
+    with pytest.raises(TypeError, match="key must be a str"):
+        once.execute(send, key=123)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="empty"):
+        once.execute(send, key="")
+    with pytest.raises(TypeError, match="idempotency_key for 'send' must be a str"):
+        once.execute(send, idempotency_key=123)
+    assert once.records() == []
+    once.close()
+
+
+def test_purge_rejects_a_negative_age(tmp_path: Path) -> None:
+    with Once(tmp_path / "p.db") as once, pytest.raises(ValueError, match="older_than"):
+        once.purge(older_than=-1)
+
+
+def test_an_outcome_that_cannot_be_stored_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    once = Once(tmp_path / "r.db")
+
+    def charge() -> str:
+        once.reset("k")  # someone resets the record while the call runs
+        return "ch_1"
+
+    assert once.execute(charge, key="k") == "ch_1"
+    assert once.get("k") is None
+    assert "outcome of k was not stored" in caplog.text
+    once.close()
+
+
+def test_cli_reset_refuses_a_pending_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "c.db"
+    with Once(path) as once:
+        assert once.store.claim("running", None) is not None
+    assert main(["reset", "--db", str(path), "running"]) == 1
+    assert "pending" in capsys.readouterr().err
+    with Once(path) as once:
+        assert once.get("running") is not None
+    assert main(["reset", "--db", str(path), "--force", "running"]) == 0
+    with Once(path) as once:
+        assert once.get("running") is None
+
+
+def test_cli_ls_keeps_one_line_per_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "l.db"
+
+    def fail() -> None:
+        raise ValueError("line one\nline two\twith a tab")
+
+    with Once(path) as once, pytest.raises(ValueError):
+        once.execute(fail, key="k")
+    assert main(["ls", "--db", str(path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert lines[0].split("\t")[3] == r"ValueError: line one\nline two\twith a tab"
+
+    assert main(["ls", "--db", str(path), "--json"]) == 0
+    row = json.loads(capsys.readouterr().out)
+    assert row["key"] == "k" and row["error"] == "ValueError: line one\nline two\twith a tab"

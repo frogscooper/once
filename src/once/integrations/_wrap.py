@@ -8,6 +8,7 @@ from collections.abc import Callable, Collection
 from typing import Any, ParamSpec, TypeVar, cast
 
 from ..core import KEY_PARAM, TTL, KeyFn, Once, Verifier
+from ..intent import Intent
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -26,6 +27,7 @@ def wrap(
     scope_of: ScopeOf,
     ttl: TTL | None = None,
     key: KeyFn | None = None,
+    intent: Intent | None = None,
 ) -> Callable[P, R]:
     """Wrap ``fn`` with once.tool and set the scope from each call's arguments.
 
@@ -33,7 +35,9 @@ def wrap(
     (if any) is used. With ``key``, the excluded parameters are left out of
     the dict it gets.
     """
-    inner: Callable[..., Any] = once._decorator(name, timeout, verify, exclude, ttl, key)(fn)
+    inner: Callable[..., Any] = once._decorator(
+        name, timeout, verify, exclude, ttl, key, None, intent
+    )(fn)
     sig = inspect.signature(fn)
     # Hide idempotency_key from the framework so it is not offered to the model.
     public = sig.replace(parameters=[p for p in sig.parameters.values() if p.name != KEY_PARAM])

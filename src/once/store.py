@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS effects (
     args_hash TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT -- done records with a ttl; NULL means never
+    expires_at TEXT, -- done records with a ttl; NULL means never
+    args TEXT -- JSON of the compared arguments, for tools with an intent
 )
 """
 
@@ -31,7 +32,9 @@ EXPIRES_INDEX = (
     "CREATE INDEX IF NOT EXISTS effects_expires_at ON effects (expires_at) "
     "WHERE expires_at IS NOT NULL"
 )
-_COLUMNS = "key, status, result, error, args_hash, created_at, updated_at, expires_at"
+_COLUMNS = "key, status, result, error, args_hash, created_at, updated_at, expires_at, args"
+# Columns added after the first release, with their types.
+ADDED_COLUMNS = (("expires_at", "TEXT"), ("args", "TEXT"))
 
 
 class Status(str, enum.Enum):
@@ -51,6 +54,8 @@ class Record:
     created_at: str
     updated_at: str
     expires_at: str | None = None
+    args: str | None = None
+    """JSON of the arguments an intent compares on a replay, from the first call."""
 
     def age(self) -> float:
         """Seconds since the record was last updated."""
@@ -98,8 +103,12 @@ class Store(Protocol):
     that value as the owner token, and finish only applies while it matches.
     """
 
-    def claim(self, key: str, args_hash: str | None) -> str | None:
-        """Insert a pending record. Returns an owner token, or None if the key exists."""
+    def claim(self, key: str, args_hash: str | None, args: str | None = None) -> str | None:
+        """Insert a pending record. Returns an owner token, or None if the key exists.
+
+        ``args`` is only passed for tools with an intent. A store that doesn't
+        take it still works for every other tool.
+        """
         ...
 
     def get(self, key: str) -> Record | None: ...
@@ -127,7 +136,7 @@ class Store(Protocol):
         """Change a record only if it is unchanged since it was read."""
         ...
 
-    def renew(self, record: Record, args_hash: str | None) -> str | None:
+    def renew(self, record: Record, args_hash: str | None, args: str | None = None) -> str | None:
         """Turn an expired record back into a fresh pending one, if it is unchanged.
 
         Returns an owner token, or None if someone else changed it first.
@@ -211,14 +220,17 @@ class SQLiteStore:
                 time.sleep(0.01)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        # Databases made before ttl support have no expires_at column or
-        # index. The write lock keeps two processes from both adding them.
+        # Older databases lack the columns in ADDED_COLUMNS and the
+        # expires_at index. The write lock keeps two processes from both
+        # adding them.
         if self._migrated(conn):
             return
         conn.execute("BEGIN IMMEDIATE")
         try:
-            if not self._has_expires_at(conn):
-                conn.execute("ALTER TABLE effects ADD COLUMN expires_at TEXT")
+            have = self._columns(conn)
+            for name, kind in ADDED_COLUMNS:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE effects ADD COLUMN {name} {kind}")
             conn.execute(EXPIRES_INDEX)
             conn.execute("COMMIT")
         except BaseException:
@@ -229,11 +241,12 @@ class SQLiteStore:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'effects_expires_at'"
         ).fetchone()
-        return row is not None and self._has_expires_at(conn)
+        have = self._columns(conn)
+        return row is not None and all(name in have for name, _ in ADDED_COLUMNS)
 
     @staticmethod
-    def _has_expires_at(conn: sqlite3.Connection) -> bool:
-        return any(row[1] == "expires_at" for row in conn.execute("PRAGMA table_info(effects)"))
+    def _columns(conn: sqlite3.Connection) -> set[str]:
+        return {row[1] for row in conn.execute("PRAGMA table_info(effects)")}
 
     def _conn(self) -> sqlite3.Connection:
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
@@ -263,13 +276,13 @@ class SQLiteStore:
             conn.close()
         self._local = threading.local()
 
-    def claim(self, key: str, args_hash: str | None) -> str | None:
+    def claim(self, key: str, args_hash: str | None, args: str | None = None) -> str | None:
         """Insert a pending record. Returns an owner token, or None if the key exists."""
         now = _now()
         cur = self._conn().execute(
-            "INSERT INTO effects (key, status, args_hash, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(key) DO NOTHING",
-            (key, Status.PENDING.value, args_hash, now, now),
+            "INSERT INTO effects (key, status, args_hash, created_at, updated_at, args) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO NOTHING",
+            (key, Status.PENDING.value, args_hash, now, now, args),
         )
         return now if cur.rowcount == 1 else None
 
@@ -325,7 +338,7 @@ class SQLiteStore:
         )
         return now if cur.rowcount == 1 else None
 
-    def renew(self, record: Record, args_hash: str | None) -> str | None:
+    def renew(self, record: Record, args_hash: str | None, args: str | None = None) -> str | None:
         """Turn an expired record back into a fresh pending one, if it is unchanged.
 
         Returns an owner token, or None if someone else changed it first.
@@ -333,11 +346,12 @@ class SQLiteStore:
         now = _next_token(record.updated_at)
         cur = self._conn().execute(
             "UPDATE effects SET status = ?, result = NULL, error = NULL, args_hash = ?, "
-            "created_at = ?, updated_at = ?, expires_at = NULL "
+            "args = ?, created_at = ?, updated_at = ?, expires_at = NULL "
             "WHERE key = ? AND status = ? AND updated_at = ?",
             (
                 Status.PENDING.value,
                 args_hash,
+                args,
                 now,
                 now,
                 record.key,
@@ -402,4 +416,4 @@ class SQLiteStore:
 
 
 def to_record(row: Sequence[Any]) -> Record:
-    return Record(row[0], Status(row[1]), row[2], row[3], row[4], row[5], row[6], row[7])
+    return Record(row[0], Status(row[1]), row[2], row[3], row[4], row[5], row[6], row[7], row[8])

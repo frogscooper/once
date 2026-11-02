@@ -10,6 +10,7 @@ from .exceptions import (
     OnceError,
 )
 from .hooks import Event, Hooks
+from .intent import Intent, Matcher, equal_after, exact, ignore, intent, within
 from .key import args_hash, canonical_json, make_key
 from .store import Record, SQLiteStore, Status, Store
 
@@ -21,7 +22,9 @@ __all__ = [
     "EffectUnknown",
     "Event",
     "Hooks",
+    "Intent",
     "KeyConflict",
+    "Matcher",
     "Once",
     "OnceError",
     "Record",
@@ -32,7 +35,12 @@ __all__ = [
     "args_hash",
     "canonical_json",
     "current_scope",
+    "equal_after",
+    "exact",
+    "ignore",
+    "intent",
     "make_key",
+    "within",
 ]
 
 __version__ = "0.2.0"

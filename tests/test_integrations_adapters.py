@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from once import Once, make_key
+from once import KeyConflict, Once, ignore, intent, make_key, within
 from once.integrations import langchain, mcp
 from once.integrations.crewai import once_tool as crew_tool
 from once.integrations.openai_agents import group_id
@@ -329,3 +329,45 @@ def test_key_does_not_see_the_context(once: Once) -> None:
     assert asyncio.run(main()) == [5, 5, 7]
     assert RefundTool()._run("o1", 8) == 8
     assert all(set(args) == {"order_id", "amount"} for args in seen)
+
+
+def test_intent_reaches_every_adapter(once: Once) -> None:
+    calls: dict[str, int] = dict.fromkeys(ADAPTERS, 0)
+    tools: dict[str, Callable[..., int]] = {}
+    for label, adapter in ADAPTERS.items():
+
+        def run(order_id: str, amount: int, label: str = label) -> int:
+            calls[label] += 1
+            return amount
+
+        spec = intent(label, id={"order_id": str}, match={"amount": within(abs=1), "label": ignore})
+        tools[label] = adapter(once, intent=spec)(run)
+
+    for label, tool in tools.items():
+        assert tool("o1", 5) == 5
+        assert tool("o1", 4) == 5  # within 1 of the first call: replayed
+        with pytest.raises(KeyConflict, match="amount: stored 5, got 9"):
+            tool("o1", 9)
+        assert calls[label] == 1
+        assert once.get(make_key(f"{label}@1", {"id": {"order_id": "o1"}}, None)) is not None
+
+
+def test_intent_does_not_see_the_context(once: Once) -> None:
+    spec = intent("refund", id=["order_id"])
+
+    @oa_tool(once, intent=spec)
+    async def refund(ctx: ToolContext, order_id: str, amount: int) -> int:
+        return amount
+
+    with pytest.raises(ValueError, match="not parameters"):
+        oa_tool(once, intent=intent("r", id=["ctx"]))(refund.__wrapped__)  # type: ignore[attr-defined]
+
+    async def main() -> list[int]:
+        return [
+            await refund(ToolContext("g1"), "o1", 5),
+            await refund(ToolContext("g1"), "o1", 5),
+        ]
+
+    assert asyncio.run(main()) == [5, 5]
+    record = once.records()[0]
+    assert record.args == '{"amount":5}'

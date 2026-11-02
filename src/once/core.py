@@ -22,6 +22,7 @@ from typing import Any, ParamSpec, TypeVar, cast, overload
 from ._otel import aspan, span
 from .exceptions import EffectFailed, EffectPending, EffectUnknown, KeyConflict, OnceError
 from .hooks import Event, Hook, Hooks, Kind, Outcome, acall_hook, call_sync_hook, logger
+from .intent import Intent
 from .key import args_hash, canonical_json, make_key
 from .store import Record, Status, Store, expiry, open_store
 
@@ -30,12 +31,14 @@ R = TypeVar("R")
 
 KEY_PARAM = "idempotency_key"
 
-Verifier = Callable[[str, dict[str, Any]], Any]
+Verifier = Callable[..., Any]
 # Gets the bound arguments, returns the identity of the call.
 KeyFn = Callable[[dict[str, Any]], Any]
 """verify(key, args) returns the effect's result if it happened, or NOT_HAPPENED.
 
-For async tools it may also be an async function.
+For async tools it may also be an async function. If it has a parameter named
+``stored``, it also gets the first call's compared arguments for a tool with
+an intent, or None.
 """
 
 TTL = float | timedelta
@@ -90,6 +93,10 @@ class _Call:
     args_hash: str
     args: dict[str, Any]
     invoke: Callable[[], Any]
+    intent: Intent | None = None
+    # For an intent: the compared args as stored (JSON), and read back.
+    stored: str | None = None
+    compared: dict[str, Any] | None = None
 
 
 @dataclass
@@ -132,6 +139,17 @@ def _ttl(ttl: TTL | None) -> float | None:
     except OverflowError:
         return math.inf  # past year 9999, so it never runs out
     return seconds
+
+
+def _timeout(timeout: float | None) -> float | None:
+    """Check a timeout. A zero or negative one would start the call and give up
+    on it at once, marking an effect that is about to happen as unknown."""
+    if timeout is None:
+        return None
+    seconds = float(timeout)
+    if math.isnan(seconds) or seconds <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout!r}")
+    return None if math.isinf(seconds) else seconds
 
 
 def _expiry(ttl: float | None) -> str | None:
@@ -242,6 +260,7 @@ class Once:
         exclude: Collection[str] = (),
         ttl: TTL | None = None,
         key: KeyFn | None = None,
+        intent: Intent | None = None,
     ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
     def tool(
@@ -254,6 +273,7 @@ class Once:
         exclude: Collection[str] = (),
         ttl: TTL | None = None,
         key: KeyFn | None = None,
+        intent: Intent | None = None,
     ) -> Any:
         """Decorate a tool function so each distinct call runs at most once.
 
@@ -280,10 +300,17 @@ class Once:
         ``idempotency_key`` from the caller still wins, and the stored hash is
         still only the value. ``key`` gets a copy, so changing it doesn't
         change the call. ``key`` can't be combined with ``exclude``.
+
+        ``intent`` (from ``once.intent(...)``) says what makes two calls the
+        same act: ``id`` fields pick the record, and matchers decide whether
+        the other fields are close enough to replay. The first call's
+        compared arguments are stored, and a replay outside the matchers
+        raises KeyConflict naming the fields. The tool takes the intent's
+        name, so it can't be combined with ``name`` or ``key``.
         """
         if key is not None and exclude:
             raise ValueError("pass key or exclude, not both: with key, exclude has no effect")
-        return self._decorator(name, timeout, verify, exclude, ttl, key, fn)
+        return self._decorator(name, timeout, verify, exclude, ttl, key, fn, intent)
 
     def _decorator(
         self,
@@ -294,40 +321,56 @@ class Once:
         ttl: TTL | None,
         key: KeyFn | None,
         fn: Callable[..., Any] | None = None,
+        intent: Intent | None = None,
     ) -> Any:
         # Integrations call this directly: they exclude their context parameter
         # from what ``key`` sees.
+        if intent is not None:
+            if not isinstance(intent, Intent):
+                raise TypeError("intent takes once.intent(...)")
+            if key is not None:
+                raise ValueError("pass key or intent, not both: the intent's id is the key")
+            if name is not None:
+                raise ValueError("pass name or intent, not both: the tool takes the intent's name")
+            name = intent.name
         if key is not None and not callable(key):
             raise TypeError(f"key must be a callable, not {type(key).__name__}")
         if inspect.iscoroutinefunction(key):
             raise TypeError("key must be a plain function, not async")
         skip = frozenset(exclude)
         seconds = _ttl(ttl)
+        timeout = _timeout(timeout)
 
         def decorate(func: Callable[P, R]) -> Callable[P, R]:
             tool_name = name or func.__name__
-            unknown = skip - set(inspect.signature(func).parameters)
+            params = inspect.signature(func).parameters
+            unknown = skip - set(params)
             if unknown:
                 names = ", ".join(repr(n) for n in sorted(unknown))
                 raise ValueError(f"exclude names {names} are not parameters of {tool_name}")
+            if intent is not None:
+                intent.check(params, skip)
+            marker = (func, tool_name, verify, skip, seconds, key, intent)
 
             if inspect.iscoroutinefunction(func):
 
                 @functools.wraps(func)
                 async def awrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-                    call = self._prepare(func, tool_name, args, kwargs, None, None, skip, key)
+                    call = self._prepare(
+                        func, tool_name, args, kwargs, None, None, skip, key, intent
+                    )
                     return await self._arun(call, True, timeout, verify, self._pick(seconds))
 
-                awrapper.__once_tool__ = (func, tool_name, verify, skip, seconds, key)  # type: ignore[attr-defined]
+                awrapper.__once_tool__ = marker  # type: ignore[attr-defined]
                 return cast(Callable[P, R], awrapper)
 
             @functools.wraps(func)
             def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-                call = self._prepare(func, tool_name, args, kwargs, None, None, skip, key)
+                call = self._prepare(func, tool_name, args, kwargs, None, None, skip, key, intent)
                 result: R = self._run(call, timeout, verify, self._pick(seconds))
                 return result
 
-            wrapper.__once_tool__ = (func, tool_name, verify, skip, seconds, key)  # type: ignore[attr-defined]
+            wrapper.__once_tool__ = marker  # type: ignore[attr-defined]
             return wrapper
 
         if fn is not None:
@@ -354,10 +397,11 @@ class Once:
         functions.
         """
         _check_key(key)
-        func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
+        timeout = _timeout(timeout)
+        func, name, verify, skip, seconds, key_fn, intent = self._unwrap(fn, tool_name, verify, ttl)
         if inspect.iscoroutinefunction(func):
             raise TypeError(f"{name!r} is async, use aexecute")
-        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn, intent)
         return self._run(call, timeout, verify, seconds)
 
     async def aexecute(
@@ -378,8 +422,9 @@ class Once:
         ``verify`` may be async or plain.
         """
         _check_key(key)
-        func, name, verify, skip, seconds, key_fn = self._unwrap(fn, tool_name, verify, ttl)
-        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn)
+        timeout = _timeout(timeout)
+        func, name, verify, skip, seconds, key_fn, intent = self._unwrap(fn, tool_name, verify, ttl)
+        call = self._prepare(func, name, (), kwargs, key, scope, skip, key_fn, intent)
         is_async = inspect.iscoroutinefunction(func)
         return await self._arun(call, is_async, timeout, verify, seconds)
 
@@ -420,6 +465,8 @@ class Once:
         """
         if older_than is None and not expired:
             raise TypeError("pass older_than, expired=True, or both")
+        if older_than is not None and not older_than >= 0:
+            raise ValueError(f"older_than must be 0 or more, got {older_than!r}")
         count = self.store.purge_expired() if expired else 0
         if older_than is not None:
             statuses = _statuses(status)
@@ -444,22 +491,29 @@ class Once:
         verify: Verifier | None,
         ttl: TTL | None,
     ) -> tuple[
-        Callable[..., Any], str, Verifier | None, frozenset[str], float | None, KeyFn | None
+        Callable[..., Any],
+        str,
+        Verifier | None,
+        frozenset[str],
+        float | None,
+        KeyFn | None,
+        Intent | None,
     ]:
         func: Callable[..., Any] = fn
         key_fn: KeyFn | None = None
+        intent: Intent | None = None
         name = tool_name
         seconds = _ttl(ttl)
         marker = getattr(fn, "__once_tool__", None)
         if marker is not None:
-            func, default_name, default_verify, skip, default_ttl, key_fn = marker
+            func, default_name, default_verify, skip, default_ttl, key_fn, intent = marker
             name = name or default_name
             verify = verify or default_verify
             seconds = default_ttl if seconds is None else seconds
         else:
             skip = frozenset()
         name = str(name or getattr(func, "__name__", "tool"))
-        return func, name, verify, skip, self._pick(seconds), key_fn
+        return func, name, verify, skip, self._pick(seconds), key_fn, intent
 
     def _pick(self, ttl: float | None) -> float | None:
         return self.ttl if ttl is None else ttl
@@ -474,6 +528,7 @@ class Once:
         scope: str | None,
         exclude: frozenset[str] = frozenset(),
         key_fn: KeyFn | None = None,
+        intent: Intent | None = None,
     ) -> _Call:
         sig = inspect.signature(func)
         bound = sig.bind(*args, **kwargs)
@@ -481,10 +536,35 @@ class Once:
         explicit = bound.arguments.pop(KEY_PARAM, None)
         if explicit == "":  # often a default; same as None, so compute the key
             explicit = None
+        if explicit is not None and not isinstance(explicit, str):
+            raise TypeError(
+                f"{KEY_PARAM} for {tool_name!r} must be a str, not {type(explicit).__name__}"
+            )
         call_args = {k: v for k, v in bound.arguments.items() if k not in exclude}
         if key is None:
             key = explicit
-        if key_fn is not None:
+        stored: str | None = None
+        compared: dict[str, Any] | None = None
+        if intent is not None:
+            # The id fields pick the record; the compared fields are stored
+            # with it and checked against the matchers on a replay.
+            ident = intent.identity(call_args)
+            fields = intent.compared(call_args)
+            try:
+                stored = canonical_json(fields)
+            except (TypeError, ValueError) as exc:
+                bad = next((name for name, v in fields.items() if not _is_json(v)), None)
+                what = "arguments" if bad is None else f"argument {bad!r}"
+                raise TypeError(
+                    f"{what} to {tool_name!r} must be JSON serializable, or ignored by the intent"
+                ) from exc
+            compared = json.loads(stored)
+            if key is None:
+                if scope is None:
+                    scope = _current_scope.get()
+                key = make_key(intent.tag, {"id": ident}, scope)
+            h = args_hash({"intent": intent.tag, "id": ident})
+        elif key_fn is not None:
             # The identity comes from key_fn, so only its value is hashed and
             # the other arguments may differ (or not be JSON) on a replay. A
             # key from the caller still names the record.
@@ -512,7 +592,25 @@ class Once:
         def invoke() -> Any:
             return func(*bound.args, **bound.kwargs)
 
-        return _Call(key, tool_name, h, call_args, invoke)
+        return _Call(key, tool_name, h, call_args, invoke, intent, stored, compared)
+
+    def _conflict(self, call: _Call, record: Record) -> KeyConflict | None:
+        """The KeyConflict to raise if ``record`` is not the same act as ``call``."""
+        if record.args_hash != call.args_hash:
+            return KeyConflict(call.key, record.args_hash, call.args_hash)
+        if call.intent is None or call.compared is None:
+            return None
+        if record.args is None:
+            return KeyConflict(
+                call.key,
+                record.args_hash,
+                call.args_hash,
+                "the stored record has no arguments to compare with",
+            )
+        differences = call.intent.differences(json.loads(record.args), call.compared)
+        if not differences:
+            return None
+        return KeyConflict(call.key, record.args_hash, call.args_hash, "; ".join(differences))
 
     def _verifiable(self, record: Record) -> bool:
         if record.status is Status.UNKNOWN:
@@ -537,11 +635,16 @@ class Once:
     # the owner's entry.
 
     def _claim(
-        self, key: str, h: str, owner: int | None = None
+        self, key: str, h: str, stored: str | None, owner: int | None = None
     ) -> tuple[str | None, _InFlight | None]:
         """Claim the key. ``owner`` is the event loop's thread for async callers."""
         with self._inflight_guard:
-            token = self.store.claim(key, h)
+            # args only goes to the store for intents, so stores written
+            # before it existed keep working for every other tool.
+            if stored is None:
+                token = self.store.claim(key, h)
+            else:
+                token = self.store.claim(key, h, args=stored)
             if token is not None:
                 self._register(key, owner)
                 return token, None
@@ -554,10 +657,15 @@ class Once:
                 self._register(record.key, owner)
             return token
 
-    def _renew(self, record: Record, h: str, owner: int | None = None) -> str | None:
+    def _renew(
+        self, record: Record, h: str, stored: str | None, owner: int | None = None
+    ) -> str | None:
         """Claim an expired record. Only one caller wins, the rest see it pending."""
         with self._inflight_guard:
-            token = self.store.renew(record, h)
+            if stored is None:
+                token = self.store.renew(record, h)
+            else:
+                token = self.store.renew(record, h, args=stored)
             if token is not None:
                 self._register(record.key, owner)
             return token
@@ -589,10 +697,19 @@ class Once:
         write that did land changes nothing.
         """
         try:
-            self.store.finish(key, token, status, result, error, expires_at)
+            stored = self.store.finish(key, token, status, result, error, expires_at)
         except Exception:
             logger.warning("once: storing the outcome of %s failed, retrying", key, exc_info=True)
             self.store.finish(key, token, status, result, error, expires_at)
+            return
+        if not stored:
+            # Reset, purged, or taken over by verify after stale_after while
+            # this call ran. Its outcome is returned to the caller but not kept.
+            logger.warning(
+                "once: %s outcome of %s was not stored: the record changed while the call ran",
+                status.value,
+                key,
+            )
 
     def _give_back(self, key: str, token: str) -> None:
         """Undo a claim whose call never started, so the next caller runs it.
@@ -723,7 +840,7 @@ class Once:
         with self._no_reentry(key), span(trace), self._key_lock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
-                token, local = self._claim(key, h)
+                token, local = self._claim(key, h, call.stored)
                 if token is not None:
                     return self._run_owned(trace, token, call.invoke, timeout, ttl)
                 if local is not None and not (
@@ -739,14 +856,15 @@ class Once:
                     continue  # deleted between claim and read
                 if record.expired():
                     # As if it had been purged, so the args may differ too.
-                    token = self._renew(record, h)
+                    token = self._renew(record, h, call.stored)
                     if token is not None:
                         trace.outcome = "expired-rerun"
                         return self._run_owned(trace, token, call.invoke, timeout, ttl)
                     continue
-                if record.args_hash != h:
+                conflict = self._conflict(call, record)
+                if conflict is not None:
                     trace.outcome = "conflict"
-                    raise KeyConflict(key, record.args_hash, h)
+                    raise conflict
                 if record.status is Status.DONE:
                     trace.outcome = "waited" if trace.waited else "replayed"
                     trace.status = Status.DONE
@@ -754,7 +872,7 @@ class Once:
                     return _loads(record.result)
                 if verify is None or not self._verifiable(record):
                     break
-                outcome = verify(key, dict(call.args))
+                outcome = verify(key, dict(call.args), **_verify_extra(verify, record))
                 if outcome is NOT_HAPPENED:
                     token = self._take_pending(record)
                     if token is not None:
@@ -890,7 +1008,7 @@ class Once:
         async with aspan(trace), self._key_alock(key):
             record: Record | None = None
             for _ in range(_MAX_ROUNDS):
-                token, local = await self._astep(key, self._claim, key, h, loop_thread)
+                token, local = await self._astep(key, self._claim, key, h, call.stored, loop_thread)
                 if token is not None:
                     return await self._arun_owned(trace, token, call.invoke, is_async, timeout, ttl)
                 if local is not None:
@@ -902,16 +1020,17 @@ class Once:
                 if record is None:
                     continue
                 if record.expired():
-                    token = await self._astep(key, self._renew, record, h, loop_thread)
+                    token = await self._astep(key, self._renew, record, h, call.stored, loop_thread)
                     if token is not None:
                         trace.outcome = "expired-rerun"
                         return await self._arun_owned(
                             trace, token, call.invoke, is_async, timeout, ttl
                         )
                     continue
-                if record.args_hash != h:
+                conflict = self._conflict(call, record)
+                if conflict is not None:
                     trace.outcome = "conflict"
-                    raise KeyConflict(key, record.args_hash, h)
+                    raise conflict
                 if record.status is Status.DONE:
                     trace.outcome = "waited" if trace.waited else "replayed"
                     trace.status = Status.DONE
@@ -919,7 +1038,9 @@ class Once:
                     return _loads(record.result)
                 if verify is None or not self._verifiable(record):
                     break
-                outcome = await _acall_verify(verify, key, dict(call.args))
+                outcome = await _acall_verify(
+                    verify, key, dict(call.args), _verify_extra(verify, record)
+                )
                 if outcome is NOT_HAPPENED:
                     token = await self._astep(key, self._take_pending, record, loop_thread)
                     if token is not None:
@@ -1079,10 +1200,23 @@ class Once:
         return _loads(payload)
 
 
-async def _acall_verify(verify: Verifier, key: str, args: dict[str, Any]) -> Any:
+def _verify_extra(verify: Verifier, record: Record) -> dict[str, Any]:
+    """``stored=`` for a verify function that has a ``stored`` parameter."""
+    try:
+        wants = "stored" in inspect.signature(verify).parameters
+    except (TypeError, ValueError):
+        return {}
+    if not wants:
+        return {}
+    return {"stored": None if record.args is None else json.loads(record.args)}
+
+
+async def _acall_verify(
+    verify: Verifier, key: str, args: dict[str, Any], extra: dict[str, Any]
+) -> Any:
     if inspect.iscoroutinefunction(verify):
-        return await verify(key, args)
-    outcome = await asyncio.to_thread(verify, key, args)
+        return await verify(key, args, **extra)
+    outcome = await asyncio.to_thread(functools.partial(verify, key, args, **extra))
     if inspect.isawaitable(outcome):
         outcome = await outcome
     return outcome
@@ -1104,6 +1238,10 @@ def _check_key(key: object) -> None:
             "execute(key=...) takes the key itself; to compute it from the args,"
             " use @once.tool(key=fn)"
         )
+    if key is not None and not isinstance(key, str):
+        raise TypeError(f"key must be a str, not {type(key).__name__}")
+    if key == "":
+        raise ValueError("key must not be empty; pass None to compute one")
 
 
 def _copy(value: Any, memo: dict[int, Any]) -> Any:
