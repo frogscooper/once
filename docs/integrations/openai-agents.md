@@ -45,6 +45,8 @@ once_tool(
     name=None,
     timeout=None,
     ttl=None,
+    key=None,
+    intent=None,
     verify=None,
     scope_arg=None,
     scope_from=None,
@@ -66,6 +68,6 @@ The context argument is found by its `ToolContext` or `RunContextWrapper` annota
 !!! note
     The `openai-agents` and `crewai` extras can't be installed together: the Agents SDK needs `openai>=3` and CrewAI pins `openai<3`.
 
-An `idempotency_key` parameter gets the computed key and is hidden from the model, as with the other helpers. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
+An `idempotency_key` parameter gets the computed key and is hidden from the model, as with the other helpers. `name`, `timeout`, `ttl`, `key`, [`intent`](../intents.md) and `verify` work as in `@once.tool`.
 
 `examples/openai_agents_example.py` runs offline with a scripted model.

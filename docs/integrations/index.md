@@ -10,7 +10,7 @@
 | [Pydantic AI](pydantic-ai.md) | `once.integrations.pydantic_ai` | `pydantic-ai` | `ctx.conversation_id` |
 | [CrewAI](crewai.md) | `once.integrations.crewai` | `crewai` | `once.scope()` around `kickoff()` |
 
-Every helper is called as `once_tool(once, fn, ...)` or used as a decorator, `@once_tool(once, ...)`, and takes `name`, `timeout`, `ttl` and `verify` like `@once.tool`. Most also take `scope_arg`, the name of a tool argument to use as the scope instead, such as an order id. Framework objects like the context or config argument are left out of the key.
+Every helper is called as `once_tool(once, fn, ...)` or used as a decorator, `@once_tool(once, ...)`, and takes `name`, `timeout`, `ttl`, `key`, [`intent`](../intents.md) and `verify` like `@once.tool`. Most also take `scope_arg`, the name of a tool argument to use as the scope instead, such as an order id. Framework objects like the context or config argument are left out of the key. `key` doesn't get them, and an intent can't name them.
 
 The `openai-agents` extra needs `openai-agents>=0.8.4` and `pydantic-ai` needs `pydantic-ai-slim>=1.89`. Older releases don't expose `RunConfig` to tools or `RunContext.conversation_id`, and the helpers would silently fall back to one shared key.
 

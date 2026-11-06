@@ -25,7 +25,7 @@ Return values go through JSON, so the first call and every replay return the sam
 
 - the function raises one of the `unknown_on` exception types. The default is `(TimeoutError,)`, since a timed out request may have reached the other side. Change it with `Once(unknown_on=(TimeoutError, MyClientError))`.
 - the function raises something that is not an `Exception`, like `KeyboardInterrupt` or `asyncio.CancelledError`.
-- `timeout=` runs out. `execute(..., timeout=5)` and `@once.tool(timeout=5)` stop waiting after 5 seconds. A sync call keeps running in a daemon thread, since Python cannot kill it, and its outcome is discarded. An async call is cancelled with `asyncio.wait_for`.
+- `timeout=` runs out. `execute(..., timeout=5)` and `@once.tool(timeout=5)` stop waiting after 5 seconds. A sync call keeps running in a daemon thread, since Python cannot kill it, and its outcome is discarded. An async call is cancelled with `asyncio.wait_for`. A `timeout` of zero, a negative number or NaN raises `ValueError` before anything runs, and `math.inf` means no timeout.
 - the result is not JSON serializable.
 
 Any other exception marks the record `failed`.
@@ -63,7 +63,7 @@ def charge_card(amount: int, customer: str, idempotency_key: str | None = None) 
     return {"id": charge.id}
 ```
 
-`verify(key, args)` gets the key and the call arguments (without excluded ones). Then:
+`verify(key, args)` gets the key and the call arguments (without excluded ones). For a tool with an [intent](intents.md), a parameter named `stored` also gets the first call's compared arguments. Then:
 
 - it returns a result: the record becomes `done` with that result, and nothing runs.
 - it returns `NOT_HAPPENED`: the record is taken over and the function runs again.
@@ -112,13 +112,13 @@ The tool name defaults to the function's `__name__`. Pass `name=` to keep keys s
 If the function has an `idempotency_key` parameter:
 
 - `once` passes the key in, so you can forward it downstream.
-- If the caller passes a non-empty `idempotency_key`, that value is the key. `""` and `None` mean "compute one".
+- If the caller passes a non-empty `idempotency_key`, that value is the key. `""` and `None` mean "compute one". Any other value must be a `str`, as must `execute(key=...)`.
 
 Each record also stores a hash of the tool name and arguments. Reusing a key with different arguments raises `KeyConflict`, unless the old record has [expired](ttl.md).
 
 ## Picking the identity with `key=`
 
-By default every argument is part of the key. If a retry or replay re-plans the call with slightly different arguments (a new memo, a rounded amount), the key changes and the side effect runs again. Pass `key=` to say what makes two calls the same:
+By default every argument is part of the key. If a retry or replay re-plans the call with slightly different arguments (a new memo, a rounded amount), the key changes and the side effect runs again. Pass `key=` to say what makes two calls the same. To keep checking the other arguments with a tolerance instead of ignoring them, use an [intent](intents.md):
 
 ```python
 @once.tool(key=lambda a: a["order_id"])
@@ -136,7 +136,7 @@ A few things to know:
 
 - `key` gets a copy of the arguments, so changing it doesn't change the call. It must be a plain function, not async.
 - The value follows the JSON rules below, so `123` and `"123"` are different keys. If a model might send an id as a number one time and a string the next, normalize it: `key=lambda a: str(a["order_id"])`.
-- `verify` gets the arguments of the call that is checking, which may not be the ones the first call ran with.
+- `verify` gets the arguments of the call that is checking, which may not be the ones the first call ran with. With an [intent](intents.md), `stored` has the first call's.
 - The tool name defaults to the function's `__name__`, so two lambdas, or methods with the same name on two classes, share keys. Give them `name=`.
 
 ## Gotchas

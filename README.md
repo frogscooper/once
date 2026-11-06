@@ -142,7 +142,7 @@ The key comes from the intent's name and version (`refund@1`), not the function'
 
 The first call re-raises the original exception; later calls raise the `Effect*` error, which has the stored `.record`. Failed and unknown records are never retried automatically. Once you have checked what happened, call `once.reset(key)` to allow another attempt.
 
-`TimeoutError` marks a record unknown, since the request may have reached the other side. Pass `unknown_on=(TimeoutError, MyClientError)` to change that. `execute(..., timeout=5)` and `@once.tool(timeout=5)` stop waiting after 5 seconds and mark the record unknown. The call keeps running in a background thread since Python cannot kill it; its outcome is discarded.
+`TimeoutError` marks a record unknown, since the request may have reached the other side. Pass `unknown_on=(TimeoutError, MyClientError)` to change that. `execute(..., timeout=5)` and `@once.tool(timeout=5)` stop waiting after 5 seconds and mark the record unknown. The call keeps running in a background thread since Python cannot kill it; its outcome is discarded. A `timeout` of zero, a negative number or NaN raises `ValueError` before anything runs, and `math.inf` means no timeout.
 
 `Once(wait=2.0)` waits up to 2 seconds for a pending record owned by another process before raising `EffectPending`. Calls in the same process with the same key are serialized by a lock, so they simply get the result.
 
@@ -299,7 +299,7 @@ def refund_order(order_id: str, amount: int) -> str:
     """Refund an order."""
 ```
 
-Runnable versions are in `examples/`, and none of them need an API key. The `openai-agents`, `pydantic-ai` and `crewai` extras install the framework. `crewai` and `openai-agents` can't be installed in the same environment: crewai pins `openai<3` and openai-agents needs `openai>=3`. Every helper also takes `ttl=` and `key=`, passed through to `@once.tool`; `key` doesn't get the framework's context parameter. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
+Runnable versions are in `examples/`, and none of them need an API key. The `openai-agents`, `pydantic-ai` and `crewai` extras install the framework. `crewai` and `openai-agents` can't be installed in the same environment: crewai pins `openai<3` and openai-agents needs `openai>=3`. Every helper also takes `ttl=`, `key=` and `intent=`, passed through to `@once.tool`; `key` doesn't get the framework's context parameter, and an intent can't name it. For anything else, `@once.tool(exclude=("ctx",))` leaves a parameter out of the key, and `with once.scope(...)` sets the scope.
 
 ## Expiry
 
@@ -357,14 +357,16 @@ The package installs a `once` command for looking at and cleaning up a database.
 
 ```
 once ls [--status unknown] [--limit 20]   # key, status, updated_at, error
+once ls --json                           # one JSON object per line, with results
 once show 3f2a                           # one record as JSON; a unique key prefix works
 once reset 3f2a                          # delete it so the call can run again
+once reset --force 3f2a                  # also for a pending record
 once gc --older-than 7d                  # delete done records older than 7 days
 once gc --older-than 30d --status failed --status done
 once gc --expired                        # delete done records past their ttl
 ```
 
-`gc --older-than` only deletes done records unless you pass `--status`. Deleting a pending or unknown record means the call can run again, so do that with `reset` after checking. The same operations are on `Once` as `records(status=..., limit=...)`, `purge(older_than_seconds, status=..., expired=...)` and `reset(key)`.
+`gc --older-than` only deletes done records unless you pass `--status`. Deleting a pending or unknown record means the call can run again, so do that with `reset` after checking. `reset` refuses a pending record, whose call may still be running, unless you pass `--force`. The same operations are on `Once` as `records(status=..., limit=...)`, `purge(older_than_seconds, status=..., expired=...)` and `reset(key)`.
 
 ## Storage
 
@@ -373,10 +375,10 @@ One table in SQLite, in WAL mode with a busy timeout:
 ```sql
 CREATE TABLE effects (key TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT,
   error TEXT, args_hash TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  expires_at TEXT);
+  expires_at TEXT, args TEXT);
 ```
 
-Databases and Postgres tables made before `expires_at` existed get the column and its index added when `Once` opens them; old records never expire. With `PostgresStore(create=False)` the user still needs the right to `ALTER` the table and create the index once, or you can add them yourself.
+`args` holds the compared arguments of a tool with an [intent](https://frogscooper.dev/once/intents/), and is empty for other tools. Databases and Postgres tables made before `expires_at` or `args` existed get the missing columns, and the `expires_at` index, added when `Once` opens them; old records never expire. With `PostgresStore(create=False)` the user still needs the right to `ALTER` the table and create the index once, or you can add them yourself.
 
 A call claims its key with `INSERT ... ON CONFLICT DO NOTHING`. Whoever inserts the row runs the function. This works across threads and processes on one machine. SQLite over a network filesystem is not supported.
 

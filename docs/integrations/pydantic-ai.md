@@ -37,6 +37,8 @@ once_tool(
     name=None,
     timeout=None,
     ttl=None,
+    key=None,
+    intent=None,
     verify=None,
     scope_arg=None,
     scope_from=None,
@@ -56,6 +58,6 @@ Pass your own `conversation_id` to `agent.run`. Without one, Pydantic AI makes u
 
 The context argument is found by its `RunContext` annotation or the names `ctx` and `context`; `context_arg=` names it explicitly. It is left out of the key.
 
-An `idempotency_key` parameter gets the computed key and is hidden from the model. `name`, `timeout`, `ttl` and `verify` work as in `@once.tool`.
+An `idempotency_key` parameter gets the computed key and is hidden from the model. `name`, `timeout`, `ttl`, `key`, [`intent`](../intents.md) and `verify` work as in `@once.tool`.
 
 `examples/pydantic_ai_example.py` runs offline with a `FunctionModel`.
