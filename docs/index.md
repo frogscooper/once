@@ -38,6 +38,7 @@ The import name is `once`. It needs Python 3.10 or newer and has no dependencies
 
 - [Quickstart](quickstart.md): a tool, a scope, an explicit key.
 - [Concepts](concepts.md): statuses, unknown outcomes, `verify`, `stale_after`, scopes and keys.
+- [Intents](intents.md): replay when a retry rounds an amount or rewords a memo, with a tolerance per field.
 - [Expiry and gc](ttl.md): let a result run again after a while.
 - [Backends](backends.md): SQLite, Postgres, or your own store.
 - [Verifiers](verifiers.md): ready-made `verify` callbacks for Stripe and HTTP.

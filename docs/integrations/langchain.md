@@ -35,13 +35,15 @@ once_tool(
     name=None,
     timeout=None,
     ttl=None,
+    key=None,
+    intent=None,
     verify=None,
     scope_key="thread_id",
     config_arg=None,
 )
 ```
 
-`name`, `timeout`, `ttl` and `verify` work as in `@once.tool`; `ttl` is seconds or a `timedelta` (see [Expiry and gc](../ttl.md)).
+`name`, `timeout`, `ttl`, `key`, [`intent`](../intents.md) and `verify` work as in `@once.tool`; `ttl` is seconds or a `timedelta` (see [Expiry and gc](../ttl.md)).
 
 The scope is, in order:
 

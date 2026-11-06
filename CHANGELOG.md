@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-06)
 
 - Intents: `@once.tool(intent=intent("refund", id={"order_id": str}, match={"amount": within(pct=1), "memo": ignore}))`. The `id` fields, after their normalizers, pick the record. The other fields are stored with it and checked on a replay by their matchers: `exact` (the default), `ignore`, `within(abs=, pct=)`, `equal_after(fn)` or any `(stored, new) -> bool`. A replay outside them raises `KeyConflict` naming each field, with `.detail`. Replays are always compared with the first call, so tolerances don't add up. The key comes from `name@version`, not the function name. The framework helpers take `intent=` too. See `docs/intents.md`.
 - Records have an `args` column holding an intent's compared arguments, added to existing SQLite and Postgres tables on open. `once show` and `once ls --json` print it. `Store.claim` and `Store.renew` take an optional `args`; it is only passed for tools with an intent, so stores without it keep working for other tools.
